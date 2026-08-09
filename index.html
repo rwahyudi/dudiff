@@ -313,7 +313,7 @@
 
   <script id="worker-source" type="text/plain">
 const DB_NAME = "dudiff-local-v1";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const CHUNK_BATCH = 350;
 const SCAN_BATCH = 1000;
 const TOP_LIMIT = 16;
@@ -323,6 +323,7 @@ const JSON_WRITE_CHUNK = 256 * 1024;
 const JSON_TOKEN_LIMIT = 8 * 1024 * 1024;
 const JSON_DEPTH_LIMIT = 4096;
 const PROGRESS_INTERVAL = 150;
+const COMPARISON_SHARDS = 4;
 
 function request(request) {
   return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error || new Error("Database request failed")); });
@@ -336,19 +337,12 @@ let dbReady;
 try {
   const openRequest = indexedDB.open(DB_NAME, DB_VERSION);
   openRequest.onupgradeneeded = () => {
-    const db = openRequest.result;
-    const snapshots = db.createObjectStore("snapshots", { keyPath: "id" });
-    snapshots.createIndex("createdAt", "createdAt");
-    const nodes = db.createObjectStore("nodes", { keyPath: ["snapshotId", "path"] });
-    nodes.createIndex("snapshot", "snapshotId");
-    nodes.createIndex("tree", ["snapshotId", "treeParent"]);
-    const parents = db.createObjectStore("parents", { keyPath: ["snapshotId", "path"] });
-    parents.createIndex("snapshot", "snapshotId");
-    db.createObjectStore("comparisons", { keyPath: "id" });
-    const changes = db.createObjectStore("changes", { keyPath: ["comparisonId", "path"] });
-    changes.createIndex("comparison", "comparisonId");
-    changes.createIndex("tree", ["comparisonId", "treeParent"]);
-    changes.createIndex("status", ["comparisonId", "status"]);
+    const db = openRequest.result; const tx = openRequest.transaction; const store = (name, options) => db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, options); const addIndex = (objectStore, name, keyPath) => { if (!objectStore.indexNames.contains(name)) objectStore.createIndex(name, keyPath); };
+    const snapshots = store("snapshots", { keyPath: "id" }); addIndex(snapshots, "createdAt", "createdAt");
+    const nodes = store("nodes", { keyPath: ["snapshotId", "path"] }); addIndex(nodes, "snapshot", "snapshotId"); addIndex(nodes, "tree", ["snapshotId", "treeParent"]); addIndex(nodes, "snapshotShard", ["snapshotId", "shard", "path"]);
+    const parents = store("parents", { keyPath: ["snapshotId", "path"] }); addIndex(parents, "snapshot", "snapshotId");
+    store("comparisons", { keyPath: "id" });
+    const changes = store("changes", { keyPath: ["comparisonId", "path"] }); addIndex(changes, "comparison", "comparisonId"); addIndex(changes, "tree", ["comparisonId", "treeParent"]); addIndex(changes, "status", ["comparisonId", "status"]); addIndex(changes, "statusShard", ["comparisonId", "status", "shard"]);
   };
   dbReady = request(openRequest);
 } catch (error) {
@@ -399,6 +393,7 @@ function normalizePath(value) {
 function childPath(parent, name) { return parent ? parent + "/" + normalizePath(name) : normalizePath(name); }
 function parentPath(path) { const slash = path.lastIndexOf("/"); return slash === -1 ? "" : path.slice(0, slash); }
 function extension(path) { const name = path.slice(path.lastIndexOf("/") + 1); const dot = name.lastIndexOf("."); return dot > 0 ? name.slice(dot).toLowerCase() : "[none]"; }
+function pathShard(path) { let hash = 2166136261; for (let index = 0; index < path.length; index++) { hash ^= path.charCodeAt(index); hash = Math.imul(hash, 16777619); } return (hash >>> 0) % COMPARISON_SHARDS; }
 function formatName(path) { return path || "/"; }
 function finiteNumber(value) { const number = Number(value || 0); return Number.isFinite(number) && number >= 0 ? number : 0; }
 
@@ -431,6 +426,11 @@ async function putBatch(snapshotId, records, parentPaths) {
 async function readSnapshotBatch(snapshotId, afterPath = null) {
   const db = await dbReady; const tx = db.transaction("nodes", "readonly"); const store = tx.objectStore("nodes"); const range = IDBKeyRange.lowerBound([snapshotId, afterPath || ""], afterPath !== null); const rows = [];
   await new Promise((resolve, reject) => { const cursor = store.openCursor(range); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || item.value.snapshotId !== snapshotId || rows.length >= SCAN_BATCH) return resolve(); rows.push(item.value); item.continue(); }; }); await transactionDone(tx); return rows;
+}
+
+async function readSnapshotShardBatch(snapshotId, shard, afterPath = null) {
+  const db = await dbReady; const tx = db.transaction("nodes", "readonly"); const index = tx.objectStore("nodes").index("snapshotShard"); const range = IDBKeyRange.lowerBound([snapshotId, shard, afterPath || ""], afterPath !== null); const rows = [];
+  await new Promise((resolve, reject) => { const cursor = index.openCursor(range); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || item.value.snapshotId !== snapshotId || item.value.shard !== shard || rows.length >= SCAN_BATCH) return resolve(); rows.push(item.value); item.continue(); }; }); await transactionDone(tx); return rows;
 }
 
 function formatFromName(name) {
@@ -662,7 +662,7 @@ async function parseGdu(stream, snapshot, progress) {
     if (!frame.dir || !props.name) return;
     const path = childPath(frame.dir.path, props.name); const disk = finiteNumber(props.dsize); const apparent = finiteNumber(props.asize); const ext = extension(path);
     const kind = props.notreg ? "other" : "file";
-    batch.push({ snapshotId: snapshot.id, path, parentPath: frame.dir.path, treeParent: frame.dir.path, name: normalizePath(props.name), kind, disk, apparent, mtime: finiteNumber(props.mtime), ext, flags: props.notreg ? "notreg" : props.hlnkc ? "hardlink" : "" });
+    batch.push({ snapshotId: snapshot.id, path, shard: pathShard(path), parentPath: frame.dir.path, treeParent: frame.dir.path, name: normalizePath(props.name), kind, disk, apparent, mtime: finiteNumber(props.mtime), ext, flags: props.notreg ? "notreg" : props.hlnkc ? "hardlink" : "" });
     frame.disk += disk; frame.apparent += apparent; if (kind === "file") { frame.files++; files++; extensionCounts.set(ext, (extensionCounts.get(ext) || 0) + disk); const age = ageBucket(props.mtime, importTime); ageCounts.set(age, (ageCounts.get(age) || 0) + 1); }
   };
   parser.onopenarray = () => { const parent = stack[stack.length - 1]; const index = parent && parent.type === "array" ? parent.items++ : -1; stack.push({ type: "array", index, items: 0, dir: null, disk: 0, apparent: 0, files: 0, directories: 0 }); };
@@ -678,7 +678,7 @@ async function parseGdu(stream, snapshot, progress) {
   };
   parser.onclosearray = () => {
     const frame = stack.pop(); if (!frame.dir) return;
-    const directory = { snapshotId: snapshot.id, path: frame.dir.path, parentPath: frame.dir.path ? parentPath(frame.dir.path) : "", treeParent: frame.dir.path ? parentPath(frame.dir.path) : "", name: frame.dir.name || "/", kind: "directory", disk: frame.disk, apparent: frame.apparent, mtime: frame.dir.mtime, ext: "", flags: "", files: frame.files, directories: frame.directories };
+    const directory = { snapshotId: snapshot.id, path: frame.dir.path, shard: pathShard(frame.dir.path), parentPath: frame.dir.path ? parentPath(frame.dir.path) : "", treeParent: frame.dir.path ? parentPath(frame.dir.path) : "", name: frame.dir.name || "/", kind: "directory", disk: frame.disk, apparent: frame.apparent, mtime: frame.dir.mtime, ext: "", flags: "", files: frame.files, directories: frame.directories };
     batch.push(directory); directories++;
     if (!frame.dir.path) root = directory;
     const parent = nearestDirectory(); if (parent) { parent.disk += frame.disk; parent.apparent += frame.apparent; parent.files += frame.files; parent.directories += frame.directories + 1; }
@@ -725,7 +725,7 @@ async function parseDu(stream, snapshot, progress) {
   const processRecord = line => {
     if (!line) return; const pieces = line.split("\t"); if (pieces.length < 2) return;
     const disk = finiteNumber(pieces[0]); const hasTime = pieces.length > 2 && /^\d+$/.test(pieces[1]); const rawPath = pieces.slice(hasTime ? 2 : 1).join("\t"); const path = normalizePath(rawPath); if (!path) return;
-    const parent = parentPath(path); batch.push({ snapshotId: snapshot.id, path, parentPath: parent, treeParent: parent, name: path.slice(path.lastIndexOf("/") + 1), kind: "unknown", disk, apparent: disk, mtime: hasTime ? finiteNumber(pieces[1]) : 0, ext: extension(path), flags: "" });
+    const parent = parentPath(path); batch.push({ snapshotId: snapshot.id, path, shard: pathShard(path), parentPath: parent, treeParent: parent, name: path.slice(path.lastIndexOf("/") + 1), kind: "unknown", disk, apparent: disk, mtime: hasTime ? finiteNumber(pieces[1]) : 0, ext: extension(path), flags: "" });
     if (parent) parentBatch.add(parent); records++;
   };
   const flush = async () => { if (batch.length) { await putBatch(snapshot.id, batch, parentBatch); batch = []; parentBatch.clear(); } };
@@ -751,33 +751,58 @@ async function importSnapshot({ snapshot, file, format, limit }) {
   progress({ phase: "finishing", decoded: summary.decoded, records: (summary.files || 0) + summary.directories + (summary.unknownLeaves || 0) }, true); await putSnapshot(stored); postMessage({ type: "imported", snapshot: stored });
 }
 
-async function scanBaseline(comparisonId, baselineId, progress) {
-  const db = await dbReady; let count = 0; let afterPath = null;
-  while (true) { const rows = await readSnapshotBatch(baselineId, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
-    for (const node of rows) { const beforeFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; changes.put({ comparisonId, path: node.path, treeParent: node.treeParent, name: node.name, kind: node.kind, before: node.disk, after: 0, delta: -node.disk, beforeFiles, afterFiles: beforeFiles === null ? null : 0, deltaFiles: beforeFiles === null ? null : -beforeFiles, percent: node.disk ? -100 : 0, status: "removed", beforeMtime: node.mtime }); count++; }
-    await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching baseline", records: count });
+async function scanBaseline(comparisonId, baselineId, progress, shards = null) {
+  const db = await dbReady; let count = 0;
+  for (const shard of shards || [null]) { let afterPath = null;
+    while (true) { const rows = shard === null ? await readSnapshotBatch(baselineId, afterPath) : await readSnapshotShardBatch(baselineId, shard, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
+      for (const node of rows) { const beforeFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; changes.put({ comparisonId, path: node.path, shard: node.shard, treeParent: node.treeParent, name: node.name, kind: node.kind, before: node.disk, after: 0, delta: -node.disk, beforeFiles, afterFiles: beforeFiles === null ? null : 0, deltaFiles: beforeFiles === null ? null : -beforeFiles, percent: node.disk ? -100 : 0, status: "removed", beforeMtime: node.mtime }); count++; }
+      await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching baseline", records: count });
+    }
   }
   return count;
 }
 
-async function scanComparison(comparisonId, comparisonIdSnapshot, progress) {
-  const db = await dbReady; let count = 0; let afterPath = null; const growth = []; const shrink = []; const statuses = { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 };
-  while (true) { const rows = await readSnapshotBatch(comparisonIdSnapshot, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
-    for (const node of rows) { const get = changes.get([comparisonId, node.path]); get.onsuccess = () => { const previous = get.result; const before = previous ? previous.before : 0; const delta = node.disk - before; const afterFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; const beforeFiles = previous ? previous.beforeFiles : afterFiles === null ? null : 0; const deltaFiles = beforeFiles === null || afterFiles === null ? null : afterFiles - beforeFiles; let status = "unchanged"; if (!previous) status = "added"; else if (delta > 0) status = "grown"; else if (delta < 0) status = "shrunk"; else if (previous.beforeMtime !== node.mtime || deltaFiles) status = "changed"; const row = { comparisonId, path: node.path, treeParent: node.treeParent, name: node.name, kind: node.kind, before, after: node.disk, delta, beforeFiles, afterFiles, deltaFiles, percent: before ? delta / before * 100 : node.disk ? null : 0, status }; changes.put(row); statuses[status] = (statuses[status] || 0) + 1; updateTop(growth, row, "growth"); updateTop(shrink, row, "shrink"); count++; }; }
-    await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching comparison", records: count });
+async function scanComparison(comparisonId, comparisonIdSnapshot, progress, shards = null) {
+  const db = await dbReady; let count = 0; const growth = []; const shrink = []; const statuses = { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 };
+  for (const shard of shards || [null]) { let afterPath = null;
+    while (true) { const rows = shard === null ? await readSnapshotBatch(comparisonIdSnapshot, afterPath) : await readSnapshotShardBatch(comparisonIdSnapshot, shard, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
+      for (const node of rows) { const get = changes.get([comparisonId, node.path]); get.onsuccess = () => { const previous = get.result; const before = previous ? previous.before : 0; const delta = node.disk - before; const afterFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; const beforeFiles = previous ? previous.beforeFiles : afterFiles === null ? null : 0; const deltaFiles = beforeFiles === null || afterFiles === null ? null : afterFiles - beforeFiles; let status = "unchanged"; if (!previous) status = "added"; else if (delta > 0) status = "grown"; else if (delta < 0) status = "shrunk"; else if (previous.beforeMtime !== node.mtime || deltaFiles) status = "changed"; const row = { comparisonId, path: node.path, shard: node.shard, treeParent: node.treeParent, name: node.name, kind: node.kind, before, after: node.disk, delta, beforeFiles, afterFiles, deltaFiles, percent: before ? delta / before * 100 : node.disk ? null : 0, status }; changes.put(row); statuses[status] = (statuses[status] || 0) + 1; updateTop(growth, row, "growth"); updateTop(shrink, row, "shrink"); count++; }; }
+      await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching comparison", records: count });
+    }
   }
   return { count, growth, shrink, statuses };
 }
 
-async function collectRemoved(comparisonId, growth, shrink) {
-  const db = await dbReady; const tx = db.transaction("changes", "readonly"); const index = tx.objectStore("changes").index("status"); let removed = 0; await new Promise((resolve, reject) => { const req = index.openCursor(IDBKeyRange.only([comparisonId, "removed"])); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); removed++; updateTop(shrink, cursor.value, "shrink"); cursor.continue(); }; }); await transactionDone(tx); return removed;
+async function collectRemoved(comparisonId, growth, shrink, shards = null) {
+  const db = await dbReady; let removed = 0;
+  for (const shard of shards || [null]) { const tx = db.transaction("changes", "readonly"); const index = tx.objectStore("changes").index(shard === null ? "status" : "statusShard"); const key = shard === null ? [comparisonId, "removed"] : [comparisonId, "removed", shard]; await new Promise((resolve, reject) => { const req = index.openCursor(IDBKeyRange.only(key)); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); removed++; updateTop(shrink, cursor.value, "shrink"); cursor.continue(); }; }); await transactionDone(tx); }
+  return removed;
+}
+
+async function readySnapshots(baseline, comparison) {
+  const db = await dbReady; const tx = db.transaction("snapshots", "readonly"); const snapshots = tx.objectStore("snapshots"); const base = await request(snapshots.get(baseline)); const current = await request(snapshots.get(comparison)); await transactionDone(tx); if (!base || !current || base.status !== "ready" || current.status !== "ready") throw new Error("Both snapshots must finish indexing before comparison"); return { db, base, current };
+}
+
+function mergeShardResults(results) {
+  const merged = { count: 0, growth: [], shrink: [], statuses: { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 } };
+  for (const result of results) { merged.count += result.count; merged.growth.push(...result.growth); merged.shrink.push(...result.shrink); for (const key of Object.keys(merged.statuses)) merged.statuses[key] += result.statuses[key] || 0; }
+  merged.growth.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)); merged.growth.length = Math.min(TOP_LIMIT, merged.growth.length); merged.shrink.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)); merged.shrink.length = Math.min(TOP_LIMIT, merged.shrink.length); return merged;
+}
+
+async function writeComparisonResult(id, baseline, comparison, shardResults) {
+  const { db, base, current } = await readySnapshots(baseline, comparison); const result = shardResults.length === 1 ? shardResults[0] : mergeShardResults(shardResults);
+  const summary = { before: base.summary.totalDisk, after: current.summary.totalDisk, delta: current.summary.totalDisk - base.summary.totalDisk, percent: base.summary.totalDisk ? (current.summary.totalDisk - base.summary.totalDisk) / base.summary.totalDisk * 100 : null, directories: { before: base.summary.directories, after: current.summary.directories, delta: current.summary.directories - base.summary.directories }, files: { before: base.summary.files, after: current.summary.files, delta: base.summary.files === null || current.summary.files === null ? null : current.summary.files - base.summary.files, unknown: (base.summary.unknownLeaves || 0) + (current.summary.unknownLeaves || 0) }, statuses: result.statuses };
+  const comparisonRecord = { id, baseline, comparison, createdAt: Date.now(), summary, growth: result.growth, shrink: result.shrink, properties: { baseline: base.summary.extensions || [], comparison: current.summary.extensions || [], baselineAges: base.summary.ages || [], comparisonAges: current.summary.ages || [] } }; const write = db.transaction("comparisons", "readwrite"); write.objectStore("comparisons").put(comparisonRecord); await transactionDone(write); postMessage({ type: "compared", comparison: comparisonRecord, snapshots: { baseline: base, comparison: current } });
 }
 
 async function compareSnapshots({ id, baseline, comparison }) {
-  const db = await dbReady; const tx = db.transaction("snapshots", "readonly"); const snapshots = tx.objectStore("snapshots"); const base = await request(snapshots.get(baseline)); const current = await request(snapshots.get(comparison)); await transactionDone(tx); if (!base || !current || base.status !== "ready" || current.status !== "ready") throw new Error("Both snapshots must finish indexing before comparison");
+  await readySnapshots(baseline, comparison);
   const progress = progressReporter(id); progress({ phase: "starting comparison", records: 0 }, true); await scanBaseline(id, baseline, progress); const result = await scanComparison(id, comparison, progress); result.statuses.removed = await collectRemoved(id, result.growth, result.shrink);
-  const summary = { before: base.summary.totalDisk, after: current.summary.totalDisk, delta: current.summary.totalDisk - base.summary.totalDisk, percent: base.summary.totalDisk ? (current.summary.totalDisk - base.summary.totalDisk) / base.summary.totalDisk * 100 : null, directories: { before: base.summary.directories, after: current.summary.directories, delta: current.summary.directories - base.summary.directories }, files: { before: base.summary.files, after: current.summary.files, delta: base.summary.files === null || current.summary.files === null ? null : current.summary.files - base.summary.files, unknown: (base.summary.unknownLeaves || 0) + (current.summary.unknownLeaves || 0) }, statuses: result.statuses };
-  const comparisonRecord = { id, baseline, comparison, createdAt: Date.now(), summary, growth: result.growth, shrink: result.shrink, properties: { baseline: base.summary.extensions || [], comparison: current.summary.extensions || [], baselineAges: base.summary.ages || [], comparisonAges: current.summary.ages || [] } }; const write = db.transaction("comparisons", "readwrite"); write.objectStore("comparisons").put(comparisonRecord); await transactionDone(write); postMessage({ type: "compared", comparison: comparisonRecord, snapshots: { baseline: base, comparison: current } });
+  await writeComparisonResult(id, baseline, comparison, [result]);
+}
+
+async function compareShard({ id, baseline, comparison, shards }) {
+  await readySnapshots(baseline, comparison); const progress = progressReporter(id); progress({ phase: "comparing shard " + shards.join(","), records: 0 }, true); await scanBaseline(id, baseline, progress, shards); const result = await scanComparison(id, comparison, progress, shards); result.statuses.removed = await collectRemoved(id, result.growth, result.shrink, shards); postMessage({ type: "shard-compared", comparisonId: id, result });
 }
 
 let work = Promise.resolve();
@@ -786,17 +811,19 @@ self.onmessage = event => {
   work = work.then(async () => {
     if (message.type === "import") await importSnapshot(message);
     if (message.type === "compare") await compareSnapshots(message);
+    if (message.type === "compare-shard") await compareShard(message);
+    if (message.type === "finalize-comparison") await writeComparisonResult(message.id, message.baseline, message.comparison, message.shardResults || []);
     if (message.type === "cleanup-snapshot") await cleanupSnapshot(message.snapshotId);
     if (message.type === "cleanup-comparison") await cleanupComparison(message.comparisonId);
     if (message.type === "prune") await pruneData(message.snapshotIds || [], message.comparisonId);
-  }).catch(async error => { try { if (message.type === "import") await cleanupSnapshot(message.snapshot?.id); if (message.type === "compare") await cleanupComparison(message.id); } catch {} postMessage({ type: "error", snapshotId: message.snapshot?.id || message.id, message: error.message || String(error) }); });
+  }).catch(async error => { try { if (message.type === "import") await cleanupSnapshot(message.snapshot?.id); if (message.type === "compare" || message.type === "finalize-comparison") await cleanupComparison(message.id); } catch {} postMessage({ type: "error", snapshotId: message.snapshot?.id || message.id, message: error.message || String(error) }); });
 };
   </script>
 
   <script>
     const DB_NAME = "dudiff-local-v1";
-    const DB_VERSION = 1;
-    const state = { baseline: null, comparison: null, workers: {}, parallelImports: (navigator.hardwareConcurrency || 2) >= 4, processing: false, comparing: false, comparisonId: null, currentPath: "", currentRow: null, selectedPath: null, selectedTreeIndex: -1, treeRows: [], treeSort: { key: "before", direction: -1 }, treeLoad: 0, treeTransaction: null, treeViewport: { start: -1, end: -1 }, searchResults: [], searchActiveIndex: -1, searchToken: 0, searchTransaction: null, comparisonRecord: null };
+    const DB_VERSION = 2;
+    const state = { baseline: null, comparison: null, workers: {}, parallelImports: (navigator.hardwareConcurrency || 2) >= 4, processing: false, comparing: false, comparisonRun: null, comparisonId: null, currentPath: "", currentRow: null, selectedPath: null, selectedTreeIndex: -1, treeRows: [], treeSort: { key: "before", direction: -1 }, treeLoad: 0, treeTransaction: null, treeViewport: { start: -1, end: -1 }, searchResults: [], searchActiveIndex: -1, searchToken: 0, searchTransaction: null, comparisonRecord: null };
     const $ = selector => document.querySelector(selector);
     const treeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     let treeScrollFrame = 0; let tooltipFrame = 0; let tooltipPoint = null; let tooltipSize = { width: 0, height: 0 };
@@ -808,12 +835,11 @@ self.onmessage = event => {
     try {
       const openRequest = indexedDB.open(DB_NAME, DB_VERSION);
       openRequest.onupgradeneeded = () => {
-        const db = openRequest.result;
-        const snapshots = db.createObjectStore("snapshots", { keyPath: "id" }); snapshots.createIndex("createdAt", "createdAt");
-        const nodes = db.createObjectStore("nodes", { keyPath: ["snapshotId", "path"] }); nodes.createIndex("snapshot", "snapshotId"); nodes.createIndex("tree", ["snapshotId", "treeParent"]);
-        const parents = db.createObjectStore("parents", { keyPath: ["snapshotId", "path"] }); parents.createIndex("snapshot", "snapshotId");
-        db.createObjectStore("comparisons", { keyPath: "id" });
-        const changes = db.createObjectStore("changes", { keyPath: ["comparisonId", "path"] }); changes.createIndex("comparison", "comparisonId"); changes.createIndex("tree", ["comparisonId", "treeParent"]); changes.createIndex("status", ["comparisonId", "status"]);
+        const db = openRequest.result; const tx = openRequest.transaction; const store = (name, options) => db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, options); const addIndex = (objectStore, name, keyPath) => { if (!objectStore.indexNames.contains(name)) objectStore.createIndex(name, keyPath); };
+        const snapshots = store("snapshots", { keyPath: "id" }); addIndex(snapshots, "createdAt", "createdAt");
+        const nodes = store("nodes", { keyPath: ["snapshotId", "path"] }); addIndex(nodes, "snapshot", "snapshotId"); addIndex(nodes, "tree", ["snapshotId", "treeParent"]); addIndex(nodes, "snapshotShard", ["snapshotId", "shard", "path"]);
+        const parents = store("parents", { keyPath: ["snapshotId", "path"] }); addIndex(parents, "snapshot", "snapshotId"); store("comparisons", { keyPath: "id" });
+        const changes = store("changes", { keyPath: ["comparisonId", "path"] }); addIndex(changes, "comparison", "comparisonId"); addIndex(changes, "tree", ["comparisonId", "treeParent"]); addIndex(changes, "status", ["comparisonId", "status"]); addIndex(changes, "statusShard", ["comparisonId", "status", "shard"]);
       };
       dbReady = request(openRequest);
     } catch (error) {
@@ -866,6 +892,7 @@ self.onmessage = event => {
 
     function terminateWorker(slot) { const worker = state.workers[slot]; if (!worker) return; worker.terminate(); delete state.workers[slot]; }
     function terminateAllWorkers() { Object.keys(state.workers).forEach(terminateWorker); }
+    function terminateComparisonWorkers() { Object.keys(state.workers).filter(slot => slot.startsWith("compare-")).forEach(terminateWorker); }
     function createWorker(slot) {
       terminateWorker(slot); const source = $("#worker-source").textContent; const workerUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" })); const worker = new Worker(workerUrl); setTimeout(() => URL.revokeObjectURL(workerUrl), 0);
       worker.onmessage = event => handleWorkerMessage(event.data, slot); worker.onmessageerror = () => toast("Worker could not return a result to this page.", true); worker.onerror = event => { event.preventDefault(); if (state.workers[slot] === worker) delete state.workers[slot]; toast("Worker failed: " + (event.message || "unknown startup error"), true); }; state.workers[slot] = worker; return worker;
@@ -875,23 +902,32 @@ self.onmessage = event => {
     function importWorker(role, restart = false) { const slot = state.parallelImports ? role : "import"; return restart && state.parallelImports ? createWorker(slot) : workerFor(slot); }
     function handleWorkerMessage(message, slot) {
       if (message.type === "progress") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; const file = role ? state[role] : null; const ratio = file?.size ? Math.min(.98, (message.decoded || 0) / file.size) : .35; const detail = message.phase.replace("indexing", "processing") + " · " + Number(message.records || 0).toLocaleString() + " records"; updateJob(message.snapshotId, role === "baseline" ? "Baseline" : "Comparison", detail, ratio); els.reportLoadingDetail.textContent = detail; }
-      if (message.type === "imported") { const role = snapshotRole(message.snapshot.id); if (!role) return; state[role + "ReadyId"] = message.snapshot.id; (role === "baseline" ? els.baselineMeta : els.comparisonMeta).textContent = snapshotMeta(message.snapshot); setUploadProgress(role, 100, "ready", "Processing complete"); if (state.parallelImports && slot === role) terminateWorker(slot); if (state.baselineReadyId && state.comparisonReadyId) startComparison(); else els.reportLoadingDetail.textContent = (role === "baseline" ? "Baseline" : "Comparison") + " ready · choose the other snapshot"; }
-      if (message.type === "compared") { if (message.comparison.id !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; els.importButton.disabled = false; state.comparisonRecord = message.comparison; state.snapshots = message.snapshots; coordinatorWorker().postMessage({ type: "prune", snapshotIds: [message.comparison.baseline, message.comparison.comparison], comparisonId: message.comparison.id }); renderWorkspace(); }
-      if (message.type === "error") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; if (role) { setUploadProgress(role, 100, "error", "Import failed"); if (state.parallelImports && slot === role) terminateWorker(slot); } stopProcessing(); toast(message.message, true); els.importButton.disabled = !(state.baseline && state.comparison); }
+      if (message.type === "imported") { const role = snapshotRole(message.snapshot.id); if (!role) return; state[role + "ReadyId"] = message.snapshot.id; state[role + "Snapshot"] = message.snapshot; (role === "baseline" ? els.baselineMeta : els.comparisonMeta).textContent = snapshotMeta(message.snapshot); setUploadProgress(role, 100, "ready", "Processing complete"); if (state.parallelImports && slot === role) terminateWorker(slot); if (state.baselineReadyId && state.comparisonReadyId) startComparison(); else els.reportLoadingDetail.textContent = (role === "baseline" ? "Baseline" : "Comparison") + " ready · choose the other snapshot"; }
+      if (message.type === "shard-compared") { const run = state.comparisonRun; if (!run || message.comparisonId !== run.id) return; run.results.push(message.result); run.pending--; terminateWorker(slot); if (!run.pending) { els.reportLoadingDetail.textContent = "Merging comparison shards"; coordinatorWorker().postMessage({ type: "finalize-comparison", id: run.id, baseline: run.baseline, comparison: run.comparison, shardResults: run.results }); } }
+      if (message.type === "compared") { if (message.comparison.id !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; state.comparisonRun = null; els.importButton.disabled = false; state.comparisonRecord = message.comparison; state.snapshots = message.snapshots; coordinatorWorker().postMessage({ type: "prune", snapshotIds: [message.comparison.baseline, message.comparison.comparison], comparisonId: message.comparison.id }); renderWorkspace(); }
+      if (message.type === "error") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; state.comparisonRun = null; if (role) { setUploadProgress(role, 100, "error", "Import failed"); if (state.parallelImports && slot === role) terminateWorker(slot); } else { terminateComparisonWorkers(); coordinatorWorker().postMessage({ type: "cleanup-comparison", comparisonId: message.snapshotId }); } stopProcessing(); toast(message.message, true); els.importButton.disabled = !(state.baseline && state.comparison); }
     }
 
+    function cancelComparison() { const comparisonId = state.comparisonIdRecord; terminateComparisonWorkers(); terminateWorker("coordinator"); state.comparing = false; state.comparisonRun = null; state.comparisonIdRecord = null; if (comparisonId) coordinatorWorker().postMessage({ type: "cleanup-comparison", comparisonId }); }
+    function snapshotEntryCount(snapshot) { if (!snapshot?.summary) return 0; return snapshot.summary.directories + (snapshot.summary.files === null ? snapshot.summary.unknownLeaves || 0 : snapshot.summary.files); }
+    function comparisonWorkerCount() { const entries = Math.max(snapshotEntryCount(state.baselineSnapshot), snapshotEntryCount(state.comparisonSnapshot)); const cores = navigator.hardwareConcurrency || 2; if (entries < 50000 || cores < 4) return 1; return cores >= 8 ? 4 : 2; }
     async function processSnapshot(role) {
-      const file = state[role]; if (!file || !await checkStorage()) return; if (state.comparing) { terminateWorker("coordinator"); state.comparing = false; }
+      const file = state[role]; if (!file || !await checkStorage()) return; if (state.comparing) cancelComparison();
       const previousSnapshotId = state[role + "ReadyId"] || state[role + "Id"]; const snapshotId = id(); const worker = importWorker(role, true); if (previousSnapshotId && previousSnapshotId !== snapshotId) (state.parallelImports ? coordinatorWorker() : worker).postMessage({ type: "cleanup-snapshot", snapshotId: previousSnapshotId });
-      state.processing = true; state.comparisonRecord = null; state.comparisonIdRecord = null; state.comparing = false; state[role + "Id"] = snapshotId; state[role + "ReadyId"] = null; els.importButton.disabled = true; showProcessing("Processing " + role + " snapshot"); setUploadProgress(role, 1, "active", "Processing");
+      state.processing = true; state.comparisonRecord = null; state.comparisonIdRecord = null; state.comparing = false; state[role + "Id"] = snapshotId; state[role + "ReadyId"] = null; state[role + "Snapshot"] = null; els.importButton.disabled = true; showProcessing("Processing " + role + " snapshot"); setUploadProgress(role, 1, "active", "Processing");
       worker.postMessage({ type: "import", snapshot: { id: snapshotId, label: role === "baseline" ? "Baseline" : "Comparison" }, file, format: els.format.value, limit: Number(els.limit.value) });
     }
     async function startImport() {
-      if (!state.baseline || !state.comparison || !await checkStorage()) return; const previousSnapshotIds = new Set([state.baselineReadyId || state.baselineId, state.comparisonReadyId || state.comparisonId].filter(Boolean)); terminateAllWorkers(); state.processing = true; state.comparing = false; state.comparisonRecord = null; els.importButton.disabled = true; showProcessing(state.parallelImports ? "Processing snapshots in parallel" : "Processing snapshots"); state.baselineId = id(); state.comparisonId = id(); state.baselineReadyId = null; state.comparisonReadyId = null; state.comparisonIdRecord = null; setUploadProgress("baseline", 1, "active", "Waiting to process"); setUploadProgress("comparison", 1, "active", "Waiting to process"); const format = els.format.value; const limit = Number(els.limit.value);
-      if (state.parallelImports) { const coordinator = coordinatorWorker(); for (const snapshotId of previousSnapshotIds) coordinator.postMessage({ type: "cleanup-snapshot", snapshotId }); const baselineWorker = importWorker("baseline", true); const comparisonWorker = importWorker("comparison", true); baselineWorker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit }); comparisonWorker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit }); }
-      else { const worker = importWorker("baseline"); for (const snapshotId of previousSnapshotIds) worker.postMessage({ type: "cleanup-snapshot", snapshotId }); worker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit }); worker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit }); }
+      if (!state.baseline || !state.comparison || !await checkStorage()) return; const previousSnapshotIds = new Set([state.baselineReadyId || state.baselineId, state.comparisonReadyId || state.comparisonId].filter(Boolean)); const partialComparisonId = state.comparisonIdRecord; terminateAllWorkers(); state.processing = true; state.comparing = false; state.comparisonRun = null; state.comparisonRecord = null; els.importButton.disabled = true; showProcessing(state.parallelImports ? "Processing snapshots in parallel" : "Processing snapshots"); state.baselineId = id(); state.comparisonId = id(); state.baselineReadyId = null; state.comparisonReadyId = null; state.baselineSnapshot = null; state.comparisonSnapshot = null; state.comparisonIdRecord = null; setUploadProgress("baseline", 1, "active", "Waiting to process"); setUploadProgress("comparison", 1, "active", "Waiting to process"); const format = els.format.value; const limit = Number(els.limit.value);
+      if (state.parallelImports) { const coordinator = coordinatorWorker(); if (partialComparisonId) coordinator.postMessage({ type: "cleanup-comparison", comparisonId: partialComparisonId }); for (const snapshotId of previousSnapshotIds) coordinator.postMessage({ type: "cleanup-snapshot", snapshotId }); const baselineWorker = importWorker("baseline", true); const comparisonWorker = importWorker("comparison", true); baselineWorker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit }); comparisonWorker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit }); }
+      else { const worker = importWorker("baseline"); if (partialComparisonId) worker.postMessage({ type: "cleanup-comparison", comparisonId: partialComparisonId }); for (const snapshotId of previousSnapshotIds) worker.postMessage({ type: "cleanup-snapshot", snapshotId }); worker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit }); worker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit }); }
     }
-    function startComparison() { if (state.comparing || !state.baselineReadyId || !state.comparisonReadyId) return; const previousComparisonId = state.comparisonRecord?.id; const comparisonId = id(); const worker = coordinatorWorker(); state.comparing = true; state.comparisonIdRecord = comparisonId; els.reportLoadingDetail.textContent = "Comparing filesystem properties"; if (previousComparisonId && previousComparisonId !== comparisonId) worker.postMessage({ type: "cleanup-comparison", comparisonId: previousComparisonId }); worker.postMessage({ type: "compare", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId }); }
+    function startComparison() {
+      if (state.comparing || !state.baselineReadyId || !state.comparisonReadyId) return; if (!state.parallelImports) terminateWorker("import"); const previousComparisonId = state.comparisonRecord?.id; const comparisonId = id(); const workerCount = comparisonWorkerCount(); const coordinator = coordinatorWorker(); state.comparing = true; state.comparisonIdRecord = comparisonId; els.reportLoadingDetail.textContent = workerCount === 1 ? "Comparing filesystem properties" : "Comparing filesystem properties across " + workerCount + " workers"; if (previousComparisonId && previousComparisonId !== comparisonId) coordinator.postMessage({ type: "cleanup-comparison", comparisonId: previousComparisonId });
+      if (workerCount === 1) { coordinator.postMessage({ type: "compare", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId }); return; }
+      const groups = Array.from({ length: workerCount }, () => []); for (let shard = 0; shard < 4; shard++) groups[shard % workerCount].push(shard); state.comparisonRun = { id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId, pending: workerCount, results: [] };
+      groups.forEach((shards, index) => createWorker("compare-" + index).postMessage({ type: "compare-shard", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId, shards }));
+    }
 
     function metric(label, value, note, tone = "") { return '<article class="metric"><div class="metric-label">' + escapeHtml(label) + '</div><div class="metric-value ' + tone + '">' + escapeHtml(value) + '</div><div class="metric-note">' + escapeHtml(note) + '</div></article>'; }
     function countText(snapshot, type) { if (type === "files" && snapshot.summary.files === null) return "at least " + Number(snapshot.summary.unknownLeaves || 0).toLocaleString(); return Number(snapshot.summary[type] || 0).toLocaleString(); }
