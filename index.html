@@ -1,0 +1,1023 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>du diff</title>
+  <style>
+    :root {
+      --paper: #fbfbfa;
+      --surface: #ffffff;
+      --ink: #111111;
+      --muted: #787774;
+      --rule: #eaeaea;
+      --blue-bg: #e1f3fe;
+      --blue: #1f6c9f;
+      --red-bg: #fdebec;
+      --red: #9f2f2d;
+      --green-bg: #edf3ec;
+      --green: #346538;
+      --yellow-bg: #fbf3db;
+      --yellow: #956400;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    @property --progress { syntax: "<number>"; inherits: false; initial-value: 0; }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 1060px; background: var(--paper); }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--blue); outline-offset: 2px;
+    }
+    .shell { width: 100%; min-width: 1060px; margin: 0; padding: 0; }
+    .app-layout { display:grid; grid-template-columns:226px minmax(0,1fr); min-height:100dvh; transition:grid-template-columns 220ms ease; }
+    .source-panel { position:sticky; top:0; height:100dvh; overflow-y:auto; border-right:1px solid #d9dcda; padding:14px 10px 20px; background:#f3f5f3; scrollbar-width:thin; transition:padding 220ms ease; }
+    .source-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; padding:3px 4px 14px; border-bottom:1px solid #d9dcda; }
+    .source-brand { min-width: 0; }
+    .source-title { margin:0; font:700 20px/.9 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:-.09em; }
+    .source-summary { margin:7px 0 0; color:var(--muted); font-size:10px; line-height:1.4; }
+    .build-meta { margin:7px 0 0; color:var(--muted); font:9px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .sidebar-content { padding-top:11px; }
+    .source-panel .storage { margin:0 4px 11px; padding:6px 7px; border:1px solid #dde0de; border-radius:4px; background:#eaedeb; text-align:left; font-size:10px; }
+    .icon-button { width:30px; height:30px; flex:0 0 auto; display:grid; place-items:center; border:1px solid #d6dad7; border-radius:6px; background:var(--surface); color:#4d5751; padding:0; }
+    .icon-button:hover { border-color:#aeb6b1; background:#f9faf8; color:var(--ink); }
+    .action-icon { width:16px; height:16px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .sidebar-toggle .action-icon { transition:transform 220ms ease; }
+    body.sidebar-collapsed .app-layout { grid-template-columns:48px minmax(0,1fr); }
+    body.sidebar-collapsed .source-panel { overflow:hidden; padding:11px 8px; }
+    body.sidebar-collapsed .source-head { justify-content:center; padding:0; border-bottom:0; }
+    body.sidebar-collapsed .source-brand,body.sidebar-collapsed .sidebar-content { display:none; }
+    body.sidebar-collapsed .sidebar-toggle .action-icon { transform:rotate(180deg); }
+    .topbar { min-height: 74px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--rule); }
+    .brand { display: flex; gap: 12px; align-items: baseline; }
+    .brand-mark { font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -0.06em; }
+    .brand-subtitle { color: var(--muted); font-size: 13px; }
+    .brand-meta { color: var(--muted); font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+    .storage { color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+    main { min-width: 0; padding: 16px 24px 40px; }
+    .intro { max-width: 790px; margin-bottom: 32px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 760px; margin-bottom: 14px; font-size: clamp(34px, 5vw, 58px); line-height: .98; letter-spacing: -.055em; font-weight: 650; }
+    h2 { font-size: 17px; letter-spacing: -.02em; margin-bottom: 4px; }
+    h3 { font-size: 13px; margin-bottom: 8px; }
+    .lede { max-width: 660px; color: var(--muted); font-size: 16px; line-height: 1.6; }
+    .import-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .import-card, .panel, .metric { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; }
+    .import-card { min-height: 250px; padding: 24px; display: flex; flex-direction: column; }
+    .source-panel .import-grid { grid-template-columns: 1fr; gap: 0; }
+    .source-panel .import-card { min-height:0; padding:10px 4px 11px; border:0; border-bottom:1px solid #d9dcda; border-radius:0; background:transparent; }
+    .snapshot-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .snapshot-heading h2 { margin-bottom:1px; font-size:13px; }
+    .source-panel .import-card .fine-print { margin-bottom:0; font-size:10px; line-height:1.35; }
+    .source-panel .dropzone { min-height:32px; margin-top:8px; border:1px solid #bfc5c1; border-radius:5px; padding:0 8px; display:flex; place-items:center; justify-content:flex-start; background:var(--surface); text-align:left; }
+    .source-panel .dropzone:hover, .source-panel .dropzone.dragover { background: var(--blue-bg); border-color: var(--blue); }
+    .source-panel .dropzone strong { display:inline; margin:0; font-size:11px; font-weight:650; }
+    .upload-button-content { display:flex !important; align-items:center; gap:7px; color:#34413a !important; }
+    .source-panel .dropzone > span > span { display: none; }
+    .source-panel .file-meta { min-height:28px; margin-top:6px; color:#5e615f; font-size:10px; line-height:1.35; white-space:pre-line; }
+    .upload-ring { --progress:0; position:relative; width:32px; height:32px; display:grid; place-items:center; flex:0 0 auto; border-radius:50%; background:conic-gradient(var(--blue) calc(var(--progress) * 1%),#dce1de 0); transition:--progress 180ms ease-out; }
+    .upload-ring::before { content:""; position:absolute; width:25px; height:25px; border-radius:50%; background:#f3f5f3; }
+    .upload-ring span { position:relative; z-index:1; font:8px/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:#4e5752; }
+    .upload-ring.active { background: conic-gradient(var(--blue) calc(var(--progress) * 1%), #dce1de 0); }
+    .upload-ring.ready { background: conic-gradient(var(--green) 100%, #dce1de 0); }
+    .upload-ring.error { background: conic-gradient(var(--red) 100%, #dce1de 0); }
+    .source-panel .import-controls { display:grid; grid-template-columns:1fr; margin:11px 4px 7px; gap:6px; }
+    .source-panel .import-controls .button { grid-column: 1 / -1; }
+    .source-panel .button { min-height:32px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 10px; font-size:11px; }
+    .source-settings { margin:10px 4px 0; border-top:1px solid #d9dcda; border-bottom:1px solid #d9dcda; padding:0; }
+    .source-settings summary { min-height:34px; display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--ink); font-size:11px; font-weight:650; list-style:none; }
+    .source-settings summary::-webkit-details-marker { display:none; }
+    .source-settings summary .action-icon { transition:transform 160ms ease; }
+    .source-settings[open] summary .action-icon { transform:rotate(180deg); }
+    .source-settings[open] summary { border-bottom: 1px solid #d9dcda; }
+    .source-settings .settings-grid { display:grid; grid-template-columns:1fr; gap:7px; padding:8px 0 9px; }
+    .source-settings .field { gap: 4px; }
+    .source-settings label { font-size: 10px; }
+    .source-settings select { min-width:0; min-height:28px; padding:0 6px; font-size:10px; }
+    .card-kicker, .eyebrow { color: var(--muted); font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+    .dropzone { position: relative; flex: 1; min-height: 128px; margin-top: 18px; border: 1px dashed #cfcfcb; border-radius: 8px; padding: 20px; display: grid; place-items: center; text-align: center; transition: background 150ms ease, border-color 150ms ease; }
+    .dropzone.dragover { background: var(--blue-bg); border-color: var(--blue); }
+    .dropzone strong { display: block; font-size: 14px; margin-bottom: 6px; }
+    .dropzone span { display: block; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .file-input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
+    .file-meta { min-height: 22px; margin-top: 12px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .import-controls { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin: 20px 0 10px; }
+    .field { display: grid; gap: 6px; }
+    label { color: var(--muted); font-size: 12px; }
+    select, input[type="text"] { min-height: 36px; border: 1px solid var(--rule); border-radius: 5px; background: var(--surface); padding: 0 10px; color: var(--ink); }
+    .button { min-height: 36px; border: 1px solid #111; border-radius: 5px; background: #111; color: #fff; padding: 0 14px; font-weight: 600; font-size: 13px; }
+    .button:hover:not(:disabled) { background: #333; }
+    .button:active:not(:disabled) { transform: scale(.98); }
+    .button:disabled { cursor: not-allowed; opacity: .42; }
+    .button.secondary { color: var(--ink); background: var(--surface); border-color: var(--rule); }
+    .button.danger { color: var(--red); background: var(--red-bg); border-color: #f4c9ca; }
+    .fine-print { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    details { margin-top: 18px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: 13px 0; }
+    summary { font-size: 13px; cursor: pointer; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; padding: 12px; background: #f7f6f3; border: 1px solid var(--rule); border-radius: 5px; color: #2f3437; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .progress-area { display: grid; gap: 8px; margin-top: 20px; }
+    .job { display: grid; grid-template-columns: minmax(100px, 180px) 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--rule); background: var(--surface); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+    .job-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .progress { height: 5px; overflow: hidden; border-radius: 4px; background: #f0f0ee; }
+    .progress > span { display: block; height: 100%; background: var(--blue); transition: width 160ms ease; }
+    .job-status { color: var(--muted); font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+    .hidden { display: none !important; }
+    .workspace { margin-top: 0; }
+    .report-empty { position: relative; min-height: min(670px, calc(100dvh - 56px)); display: grid; place-items: center; overflow: hidden; border: 1px solid var(--rule); border-radius: 10px; background: linear-gradient(135deg, #ffffff 0%, #f9fbfa 100%); }
+    .empty-content { width: min(690px, calc(100% - 72px)); padding: 42px 0; transition: opacity 280ms ease, transform 280ms ease; }
+    .empty-content h2 { max-width: 580px; margin: 9px 0 13px; font-size: clamp(32px, 4vw, 52px); line-height: .98; letter-spacing: -.05em; }
+    .empty-content > p { max-width: 610px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+    .report-commands { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 28px; }
+    .report-command { padding: 14px; border: 1px solid var(--rule); border-radius: 7px; background: rgba(255,255,255,.7); }
+    .report-command h3 { margin-bottom: 7px; }
+    .report-command p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .report-command code { display: block; margin-top: 10px; color: #2f3437; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .report-loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 16px; opacity: 0; pointer-events: none; transform: translateY(10px); transition: opacity 240ms ease 100ms, transform 240ms ease 100ms; }
+    .report-spinner { width: 44px; height: 44px; border: 3px solid #dfe5e1; border-top-color: var(--blue); border-radius: 50%; animation: spin 780ms linear infinite; }
+    .report-loading strong { font: 650 13px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .report-loading span { color: var(--muted); font-size: 12px; }
+    .report-empty.loading .empty-content { opacity: 0; transform: translateY(-10px); }
+    .report-empty.loading .report-loading { opacity: 1; transform: translateY(0); }
+    .workspace.entering { animation: report-enter 360ms ease both; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes report-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    .workspace-head { display: flex; gap: 18px; align-items: end; justify-content: space-between; margin-bottom: 10px; }
+    .workspace-title { margin: 0; font-size: 22px; }
+    .snapshot-line { color: var(--muted); font-size: 12px; text-align: right; }
+    .comparison-strip { min-height:58px; display:grid; grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr); align-items:center; gap:10px; margin-bottom:10px; padding:9px 12px; border:1px solid var(--rule); border-radius:7px; background:var(--surface); }
+    .comparison-file { min-width:0; }
+    .comparison-file-label { display:block; color:var(--muted); font-size:9px; letter-spacing:.06em; text-transform:uppercase; }
+    .comparison-file-name { display:block; margin-top:3px; overflow:hidden; font-size:12px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+    .comparison-file-meta { display:block; margin-top:3px; overflow:hidden; color:var(--muted); font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; text-overflow:ellipsis; white-space:nowrap; }
+    .comparison-arrow { display:grid; place-items:center; color:var(--blue); }
+    .comparison-arrow .action-icon { width:20px; height:20px; }
+    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+    .metric { min-height: 80px; padding: 11px 13px; border-radius: 7px; }
+    .metric-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+    .metric-value { margin-top: 9px; font: 650 clamp(16px, 1.55vw, 21px)/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -.045em; }
+    .metric-note { margin-top: 7px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .gain { color: var(--red); }
+    .reclaim { color: var(--green); }
+    .dashboard { display: grid; grid-template-columns: minmax(0,1fr); gap: 14px; margin-top: 10px; }
+    .panel { overflow: hidden; }
+    .panel-header { min-height: 60px; padding: 14px 16px; border-bottom: 1px solid var(--rule); display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+    .panel-header p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .panel-actions { display: flex; gap: 7px; align-items: center; }
+    .small-button { border: 1px solid var(--rule); background: var(--surface); border-radius: 4px; min-height: 29px; padding: 0 8px; color: var(--ink); font-size: 12px; }
+    .small-button:hover { background: #f7f6f3; }
+    .file-browser { --fb-bg:var(--paper); --fb-panel:var(--surface); --fb-panel-2:#f7f7f5; --fb-line:#dfe2df; --fb-subtle:#edf0ed; --fb-ink:var(--ink); --fb-muted:var(--muted); --fb-accent:var(--blue); --fb-green:var(--green); --fb-hover:#f6f8f6; --fb-active:var(--blue-bg); --fb-active-line:var(--blue); overflow:hidden; border-color:var(--fb-line); background:var(--fb-panel); color:var(--fb-ink); box-shadow:0 8px 20px rgba(25,35,30,.06); }
+    .browser-toolbar { position:relative; min-height:48px; display:grid; grid-template-columns:minmax(180px,1fr) minmax(250px,380px) auto; align-items:center; gap:10px; padding:7px 11px; border-bottom:1px solid var(--fb-line); background:linear-gradient(180deg,#fff 0%,#fafbf9 100%); }
+    .breadcrumbs { min-width:0; display:flex; align-items:center; gap:4px; overflow:hidden; white-space:nowrap; }
+    .breadcrumb { max-width:220px; overflow:hidden; border:0; border-radius:5px; padding:5px 6px; background:transparent; color:var(--fb-accent); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+    .breadcrumb:hover { background:var(--fb-hover); }
+    .breadcrumb[aria-current="page"] { color:var(--fb-ink); font-weight:650; cursor:default; }
+    .crumb-separator { color:#a4aaa6; font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .browser-search-wrap { position:relative; min-width:0; }
+    .browser-search-key { position:absolute; z-index:2; left:8px; top:50%; transform:translateY(-50%); display:grid; place-items:center; width:23px; height:23px; border:1px solid var(--fb-line); border-radius:6px; color:var(--fb-muted); font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace; pointer-events:none; }
+    .browser-search { width:100%; min-height:32px; border:1px solid var(--fb-line); border-radius:17px; background:var(--surface); padding:0 12px 0 39px; color:var(--fb-ink); font-size:12px; }
+    .browser-search::placeholder { color:var(--fb-muted); }
+    .browser-search-results { position:absolute; z-index:30; top:calc(100% + 6px); left:0; right:0; max-height:330px; overflow:auto; border:1px solid var(--fb-line); border-radius:8px; background:var(--surface); box-shadow:0 18px 40px rgba(20,30,25,.16); }
+    .browser-search-results[hidden] { display:none; }
+    .search-result { width:100%; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; border:0; border-bottom:1px solid var(--fb-subtle); padding:9px 11px; background:transparent; color:var(--fb-ink); text-align:left; }
+    .search-result:hover,.search-result[aria-selected="true"] { background:var(--fb-hover); }
+    .search-result-name,.search-result-path { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .search-result-name { font-size:12px; font-weight:650; }
+    .search-result-path,.search-result-meta { margin-top:2px; color:var(--fb-muted); font-size:10px; }
+    .browser-export { border-color:var(--fb-line); background:var(--surface); color:var(--fb-ink); }
+    .browser-export:hover { background:var(--fb-hover); }
+    .tree-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; border-bottom:1px solid var(--fb-line); background:var(--fb-line); }
+    .tree-summary-item { min-width:0; padding:8px 11px; background:linear-gradient(180deg,#fff 0%,#fafbf9 100%); }
+    .tree-summary-label { display:block; color:var(--fb-muted); font-size:10px; text-transform:uppercase; }
+    .tree-summary-value { display:block; margin-top:3px; overflow:hidden; color:var(--fb-ink); font-size:13px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+    .tree { --tree-columns:minmax(220px,30%) minmax(112px,1fr) minmax(112px,1fr) minmax(105px,1fr) minmax(105px,1fr); --tree-min-width:820px; height:clamp(560px,68vh,820px); min-height:560px; max-height:none; overflow:auto; background:var(--surface); outline:none; }
+    .tree-body { position:relative; min-width:var(--tree-min-width); }
+    .tree-row { width:100%; min-width:var(--tree-min-width); height:36px; min-height:36px; display:grid; grid-template-columns:var(--tree-columns); align-items:center; gap:8px; position:relative; border:0; border-bottom:1px solid var(--fb-subtle); padding:0 10px 0 12px; background:transparent; color:var(--fb-ink); cursor:pointer; text-align:left; }
+    .tree-body .tree-row { position:absolute; left:0; right:0; }
+    .tree-row::before { content:""; position:absolute; inset:0 auto 0 0; width:var(--bar,2%); background:linear-gradient(180deg,rgba(31,108,159,.10),rgba(31,108,159,.07) 48%,rgba(31,108,159,.035)); box-shadow:inset -2px 0 0 rgba(31,108,159,.16); pointer-events:none; }
+    .tree-row:hover { background:var(--fb-hover); }
+    .tree-row[aria-selected="true"] { background:var(--fb-active); outline:1px solid var(--fb-active-line); outline-offset:-1px; }
+    .tree-row[aria-selected="true"]::after { content:""; position:absolute; left:0; top:6px; bottom:6px; width:3px; border-radius:0 999px 999px 0; background:var(--fb-accent); }
+    .tree-path,.tree-cell { position:relative; z-index:1; }
+    .tree-path { min-width:0; display:flex; align-items:center; gap:7px; font-size:12px; }
+    .tree-name { overflow:hidden; font-weight:620; white-space:nowrap; text-overflow:ellipsis; }
+    .tree-icon { width:18px; height:18px; flex:0 0 auto; color:#60a5fa; }
+    .tree-row.directory .tree-icon { color:#fbbf24; }
+    .tree-kind { min-width:32px; padding:2px 4px; border:1px solid #cbd1cd; border-radius:4px; background:#f7f8f7; color:#5f6963; font-size:9px; font-weight:750; line-height:1.2; text-align:center; }
+    .tree-row.directory .tree-kind { border-color:#8fc4b8; background:#e7f4f0; color:#236b5d; }
+    .tree-cell { overflow:hidden; color:var(--fb-muted); font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+    .tree-cell.delta-positive { color:var(--red); font-weight:650; }
+    .tree-cell.delta-negative { color:var(--green); font-weight:650; }
+    .tree-head { min-width:var(--tree-min-width); min-height:32px; display:grid; grid-template-columns:var(--tree-columns); align-items:center; gap:8px; position:sticky; top:0; z-index:5; border-bottom:1px solid var(--fb-line); padding:0 10px 0 12px; background:#f6f7f5; color:var(--fb-muted); box-shadow:0 6px 12px rgba(25,35,30,.06); font-size:10px; font-weight:650; text-transform:uppercase; }
+    .tree-name-head { min-width:0; display:flex; align-items:center; gap:7px; }
+    .tree-parent-btn { width:24px; height:24px; flex:0 0 auto; display:grid; place-items:center; border:1px solid var(--fb-line); border-radius:6px; background:var(--surface); color:var(--fb-muted); padding:0; }
+    .tree-parent-btn:hover:not(:disabled) { color:var(--fb-ink); border-color:var(--fb-accent); }
+    .tree-parent-btn:disabled { opacity:.42; cursor:default; }
+    .sort-button { width:100%; min-width:0; overflow:hidden; border:0; padding:0; background:transparent; color:inherit; font:inherit; text-align:right; text-overflow:ellipsis; text-transform:inherit; white-space:nowrap; }
+    .sort-button:hover { color:var(--fb-ink); }
+    .sort-button[data-active="true"] { color:var(--fb-accent); }
+    .sort-button.path-sort { flex:1; text-align:left; }
+    .side-stack { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-content:start; }
+    .path-tooltip { position:fixed; z-index:100; max-width:min(620px,calc(100vw - 24px)); padding:7px 9px; border:1px solid #ccd2ce; border-radius:5px; background:#202521; color:#fff; box-shadow:0 8px 24px rgba(20,30,25,.2); font:10px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; pointer-events:none; opacity:0; transform:translateY(3px); transition:opacity 100ms ease,transform 100ms ease; }
+    .path-tooltip.visible { opacity:1; transform:translateY(0); }
+    .list { margin: 0; padding: 0; list-style: none; }
+    .list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid #f0f0ee; }
+    .list-item:last-child { border-bottom: 0; }
+    .list-path { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .list-value { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+    .property-grid { display: grid; grid-template-columns: 1fr 1fr; }
+    .property { padding: 13px 14px; border-bottom: 1px solid #f0f0ee; }
+    .property:nth-child(odd) { border-right: 1px solid #f0f0ee; }
+    .property-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .property-value { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+    .empty { padding: 28px 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .toast { position: fixed; z-index: 10; right: 20px; bottom: 20px; max-width: 410px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 7px; background: var(--surface); box-shadow: 0 2px 8px rgba(0,0,0,.04); font-size: 13px; line-height: 1.45; }
+    .toast.error { color: var(--red); border-color: #f4c9ca; background: #fff9f9; }
+    @media (max-width: 1050px) { .metrics { grid-template-columns: repeat(3, 1fr); } .dashboard { grid-template-columns: 1fr; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="app-layout">
+      <aside class="source-panel" id="source-panel" aria-label="Snapshot sources">
+        <header class="source-head">
+          <div class="source-brand"><h1 class="source-title">du diff</h1><p class="source-summary">Snapshot navigation. Every report stays local to this browser.</p><p class="build-meta">v0.0.1 · <time id="build-time">build time unavailable</time></p></div>
+          <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-expanded="true" aria-controls="import-view" aria-label="Collapse snapshot panel" title="Collapse snapshot panel"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 9l-3 3 3 3"/></svg></button>
+        </header>
+        <div class="sidebar-content" id="import-view">
+          <div class="storage" id="storage-status">Checking browser storage</div>
+          <p class="card-kicker">Report sources</p>
+          <div class="import-grid">
+          <article class="import-card">
+            <div class="snapshot-heading"><div><p class="card-kicker">Snapshot 1</p><h2>Baseline</h2><p class="fine-print">Reference report for every change.</p></div><div class="upload-ring" id="baseline-progress" aria-label="Baseline upload progress"><span>--</span></div></div>
+            <label class="dropzone" id="baseline-drop"><input class="file-input" id="baseline-file" type="file" accept=".json,.gdu,.du,.du0,.gz,.xz,.zip,application/json,application/gzip,application/zip"><span class="upload-button-content"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg><strong>Upload baseline</strong></span></label>
+            <div class="file-meta" id="baseline-meta">No file selected</div>
+          </article>
+          <article class="import-card">
+            <div class="snapshot-heading"><div><p class="card-kicker">Snapshot 2</p><h2>Comparison</h2><p class="fine-print">Later report measured against the reference.</p></div><div class="upload-ring" id="comparison-progress" aria-label="Comparison upload progress"><span>--</span></div></div>
+            <label class="dropzone" id="comparison-drop"><input class="file-input" id="comparison-file" type="file" accept=".json,.gdu,.du,.du0,.gz,.xz,.zip,application/json,application/gzip,application/zip"><span class="upload-button-content"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg><strong>Upload comparison</strong></span></label>
+            <div class="file-meta" id="comparison-meta">No file selected</div>
+          </article>
+          </div>
+
+          <details class="source-settings">
+            <summary><span>Report format and limits</span><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></summary>
+            <div class="settings-grid">
+              <div class="field"><label for="format">Format</label><select id="format"><option value="auto">Auto detect</option><option value="gdu">GDU JSON</option><option value="du">GNU DU</option></select></div>
+              <div class="field"><label for="limit">Safety limit</label><select id="limit"><option value="34359738368">32 GiB</option><option value="68719476736" selected>64 GiB</option><option value="137438953472">128 GiB</option></select></div>
+            </div>
+          </details>
+          <div class="import-controls">
+            <button class="button" id="import-button" disabled><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v6h-6"/></svg><span>Process snapshots</span></button>
+            <button class="button secondary" id="clear-button"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg><span>Clear local data</span></button>
+          </div>
+          <p class="fine-print">The page needs HTTPS or localhost for persistent local storage. A 16 GB archive is read in chunks; browser quota and available disk space still determine whether it can be indexed.</p>
+        </div>
+      </aside>
+
+      <main>
+      <section class="report-empty" id="report-empty" aria-live="polite">
+        <div class="empty-content"><p class="eyebrow">Local snapshot comparison</p><h2>See where disk usage changed.</h2><p>Choose a baseline and a later snapshot in the navigation panel, then process them locally. Reports stream into browser storage; no filesystem data leaves this page.</p><div class="report-commands"><article class="report-command"><h3>GDU JSON export</h3><p>Preferred for exact file and directory counts, extensions, and modification ages.</p><code>gdu -o snapshot.gdu.json /path</code><code>gdu -o- /path | gzip -c &gt; snapshot.gdu.json.gz</code></article><article class="report-command"><h3>GNU DU export</h3><p>Use a NUL-delimited, byte-sized export. Leaf paths are reported as unclassified.</p><code>LC_ALL=C du --all --block-size=1 --null --time --time-style=+%s /path &gt; snapshot.du0</code></article></div></div>
+        <div class="report-loading" id="report-loading" aria-hidden="true"><div class="report-spinner"></div><strong>Processing snapshots</strong><span id="report-loading-detail">Reading reports locally into browser storage</span></div>
+      </section>
+      <section class="workspace hidden" id="workspace" aria-labelledby="workspace-title">
+        <div class="comparison-strip" id="comparison-strip"></div>
+        <div class="workspace-head">
+          <div><p class="eyebrow">Comparison report</p><h2 class="workspace-title" id="workspace-title">Storage difference</h2></div>
+          <div class="snapshot-line" id="snapshot-line"></div>
+        </div>
+        <div class="metrics" id="metrics"></div>
+        <div class="dashboard">
+          <section class="panel file-browser" aria-label="Difference browser">
+            <div class="browser-toolbar"><nav class="breadcrumbs" id="breadcrumbs" aria-label="Current directory"></nav><div class="browser-search-wrap" role="search"><span class="browser-search-key">/</span><input class="browser-search" id="tree-search" type="search" placeholder="Search files and folders" autocomplete="off" aria-label="Search files and folders" aria-controls="tree-search-results" aria-expanded="false"><div class="browser-search-results" id="tree-search-results" role="listbox" hidden></div></div><button class="small-button browser-export" id="download-csv">Export CSV</button></div>
+            <div class="tree-summary" id="tree-summary"><div class="tree-summary-item"><span class="tree-summary-label">Baseline size</span><span class="tree-summary-value" id="tree-selected-before">0 B</span></div><div class="tree-summary-item"><span class="tree-summary-label">Size change</span><span class="tree-summary-value" id="tree-selected-change">0 B</span></div><div class="tree-summary-item"><span class="tree-summary-label">Baseline files</span><span class="tree-summary-value" id="tree-selected-files">--</span></div><div class="tree-summary-item"><span class="tree-summary-label">File change</span><span class="tree-summary-value" id="tree-selected-file-change">--</span></div></div>
+            <div class="tree" id="tree" role="tree" tabindex="0" aria-label="Filesystem difference browser"></div>
+          </section>
+          <aside class="side-stack">
+            <section class="panel"><div class="panel-header"><div><h2>Largest increases</h2><p>Top contributors to higher storage use.</p></div></div><ul class="list" id="growth-list"></ul></section>
+            <section class="panel"><div class="panel-header"><div><h2>Largest decreases</h2><p>Paths that released the most storage.</p></div></div><ul class="list" id="shrink-list"></ul></section>
+            <section class="panel"><div class="panel-header"><div><h2>Data properties</h2><p>Most common file extensions in each report.</p></div></div><div class="property-grid" id="properties"></div></section>
+            <section class="panel"><div class="panel-header"><div><h2>File age</h2><p>Modification-age buckets when the source provides file timestamps.</p></div></div><div class="property-grid" id="ages"></div></section>
+          </aside>
+        </div>
+      </section>
+    </main>
+    </div>
+  </div>
+  <div class="toast hidden" id="toast" role="status"></div>
+  <div class="path-tooltip" id="path-tooltip" role="tooltip"></div>
+
+  <script id="worker-source" type="text/plain">
+const DB_NAME = "dudiff-local-v1";
+const DB_VERSION = 1;
+const CHUNK_BATCH = 350;
+const SCAN_BATCH = 1000;
+const TOP_LIMIT = 16;
+const DELETE_BATCH = 1000;
+const DU_RECORD_LIMIT = 4 * 1024 * 1024;
+const JSON_WRITE_CHUNK = 256 * 1024;
+const JSON_TOKEN_LIMIT = 8 * 1024 * 1024;
+const JSON_DEPTH_LIMIT = 4096;
+const PROGRESS_INTERVAL = 150;
+
+function request(request) {
+  return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error || new Error("Database request failed")); });
+}
+
+function transactionDone(transaction) {
+  return new Promise((resolve, reject) => { transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error || new Error("Database transaction failed")); transaction.onabort = () => reject(transaction.error || new Error("Database transaction aborted")); });
+}
+
+let dbReady;
+try {
+  const openRequest = indexedDB.open(DB_NAME, DB_VERSION);
+  openRequest.onupgradeneeded = () => {
+    const db = openRequest.result;
+    const snapshots = db.createObjectStore("snapshots", { keyPath: "id" });
+    snapshots.createIndex("createdAt", "createdAt");
+    const nodes = db.createObjectStore("nodes", { keyPath: ["snapshotId", "path"] });
+    nodes.createIndex("snapshot", "snapshotId");
+    nodes.createIndex("tree", ["snapshotId", "treeParent"]);
+    const parents = db.createObjectStore("parents", { keyPath: ["snapshotId", "path"] });
+    parents.createIndex("snapshot", "snapshotId");
+    db.createObjectStore("comparisons", { keyPath: "id" });
+    const changes = db.createObjectStore("changes", { keyPath: ["comparisonId", "path"] });
+    changes.createIndex("comparison", "comparisonId");
+    changes.createIndex("tree", ["comparisonId", "treeParent"]);
+    changes.createIndex("status", ["comparisonId", "status"]);
+  };
+  dbReady = request(openRequest);
+} catch (error) {
+  dbReady = Promise.reject(error);
+  dbReady.catch(() => {});
+}
+
+async function deleteIndexBatch(storeName, indexName, key) {
+  const db = await dbReady; const tx = db.transaction(storeName, "readwrite"); const index = tx.objectStore(storeName).index(indexName); let deleted = 0;
+  await new Promise((resolve, reject) => { const cursor = index.openCursor(IDBKeyRange.only(key)); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || deleted >= DELETE_BATCH) return resolve(); item.delete(); deleted++; item.continue(); }; });
+  await transactionDone(tx); return deleted;
+}
+
+async function deleteIndexRecords(storeName, indexName, key) { while (await deleteIndexBatch(storeName, indexName, key)) {} }
+
+async function cleanupComparison(comparisonId) {
+  if (!comparisonId) return; await deleteIndexRecords("changes", "comparison", comparisonId); const db = await dbReady; const tx = db.transaction("comparisons", "readwrite"); tx.objectStore("comparisons").delete(comparisonId); await transactionDone(tx);
+}
+
+async function comparisonIdsForSnapshot(snapshotId) {
+  const db = await dbReady; const tx = db.transaction("comparisons", "readonly"); const ids = [];
+  await new Promise((resolve, reject) => { const cursor = tx.objectStore("comparisons").openCursor(); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item) return resolve(); if (item.value.baseline === snapshotId || item.value.comparison === snapshotId) ids.push(item.primaryKey); item.continue(); }; }); await transactionDone(tx); return ids;
+}
+
+async function cleanupSnapshot(snapshotId) {
+  if (!snapshotId) return; for (const comparisonId of await comparisonIdsForSnapshot(snapshotId)) await cleanupComparison(comparisonId);
+  await deleteIndexRecords("nodes", "snapshot", snapshotId); await deleteIndexRecords("parents", "snapshot", snapshotId); const db = await dbReady; const tx = db.transaction("snapshots", "readwrite"); tx.objectStore("snapshots").delete(snapshotId); await transactionDone(tx);
+}
+
+async function pruneData(snapshotIds, comparisonId) {
+  const keepSnapshots = new Set(snapshotIds.filter(Boolean)); const db = await dbReady;
+  const comparisonTx = db.transaction("comparisons", "readonly"); const comparisonIds = await request(comparisonTx.objectStore("comparisons").getAllKeys()); await transactionDone(comparisonTx);
+  for (const id of comparisonIds) if (id !== comparisonId) await cleanupComparison(id);
+  const snapshotTx = db.transaction("snapshots", "readonly"); const storedSnapshotIds = await request(snapshotTx.objectStore("snapshots").getAllKeys()); await transactionDone(snapshotTx);
+  for (const id of storedSnapshotIds) if (!keepSnapshots.has(id)) await cleanupSnapshot(id);
+}
+
+function progressReporter(snapshotId) {
+  let lastSent = 0; let lastPhase = "";
+  return (payload, force = false) => { const now = performance.now(); if (!force && payload.phase === lastPhase && now - lastSent < PROGRESS_INTERVAL) return; lastSent = now; lastPhase = payload.phase; postMessage({ type: "progress", snapshotId, ...payload }); };
+}
+
+function normalizePath(value) {
+  const path = String(value || "").replaceAll("\\", "/").replace(/\/+$/, "").replace(/^\/+/, "");
+  return path === "." ? "" : path;
+}
+
+function childPath(parent, name) { return parent ? parent + "/" + normalizePath(name) : normalizePath(name); }
+function parentPath(path) { const slash = path.lastIndexOf("/"); return slash === -1 ? "" : path.slice(0, slash); }
+function extension(path) { const name = path.slice(path.lastIndexOf("/") + 1); const dot = name.lastIndexOf("."); return dot > 0 ? name.slice(dot).toLowerCase() : "[none]"; }
+function formatName(path) { return path || "/"; }
+function finiteNumber(value) { const number = Number(value || 0); return Number.isFinite(number) && number >= 0 ? number : 0; }
+
+function updateTop(top, row, direction) {
+  const score = direction === "growth" ? row.delta : -row.delta;
+  if (score <= 0) return;
+  top.push({ path: row.path, delta: row.delta, kind: row.kind, status: row.status });
+  top.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  if (top.length > TOP_LIMIT) top.length = TOP_LIMIT;
+}
+
+async function putSnapshot(snapshot) {
+  const db = await dbReady;
+  const tx = db.transaction("snapshots", "readwrite");
+  tx.objectStore("snapshots").put(snapshot);
+  await transactionDone(tx);
+}
+
+async function putBatch(snapshotId, records, parentPaths) {
+  if (!records.length) return;
+  const db = await dbReady;
+  const tx = db.transaction(["nodes", "parents"], "readwrite");
+  const nodes = tx.objectStore("nodes");
+  const parents = tx.objectStore("parents");
+  for (const record of records) nodes.put(record);
+  for (const path of parentPaths) parents.put({ snapshotId, path });
+  await transactionDone(tx);
+}
+
+async function readSnapshotBatch(snapshotId, afterPath = null) {
+  const db = await dbReady; const tx = db.transaction("nodes", "readonly"); const store = tx.objectStore("nodes"); const range = IDBKeyRange.lowerBound([snapshotId, afterPath || ""], afterPath !== null); const rows = [];
+  await new Promise((resolve, reject) => { const cursor = store.openCursor(range); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || item.value.snapshotId !== snapshotId || rows.length >= SCAN_BATCH) return resolve(); rows.push(item.value); item.continue(); }; }); await transactionDone(tx); return rows;
+}
+
+function formatFromName(name) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".du") || lower.endsWith(".du0") || lower.endsWith(".txt")) return "du";
+  return "gdu";
+}
+
+async function detectArchive(file) {
+  const data = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  const magic = [...data].map(value => value.toString(16).padStart(2, "0")).join("");
+  if (magic.startsWith("1f8b")) return "gzip";
+  if (magic.startsWith("fd377a585a00")) return "xz";
+  if (magic.startsWith("504b0304") || magic.startsWith("504b0506") || magic.startsWith("504b0708")) return "zip";
+  return "plain";
+}
+
+function u16(view, offset) { return view.getUint16(offset, true); }
+function u32(view, offset) { return view.getUint32(offset, true); }
+function u64(view, offset) {
+  const value = view.getBigUint64(offset, true);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Archive offset exceeds browser safe integer range");
+  return Number(value);
+}
+
+function zip64Extra(bytes, offset, fields) {
+  let cursor = offset;
+  const end = offset + fields;
+  while (cursor + 4 <= end) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + cursor, 4);
+    const id = u16(view, 0); const size = u16(view, 2); cursor += 4;
+    if (id === 0x0001) return { bytes, offset: cursor, size };
+    cursor += size;
+  }
+  return null;
+}
+
+async function readZipEntry(file) {
+  const tailSize = Math.min(file.size, 65557);
+  const tailOffset = file.size - tailSize;
+  const tail = new Uint8Array(await file.slice(tailOffset).arrayBuffer());
+  let eocd = -1;
+  for (let index = tail.length - 22; index >= 0; index--) {
+    if (tail[index] === 0x50 && tail[index + 1] === 0x4b && tail[index + 2] === 0x05 && tail[index + 3] === 0x06) { eocd = index; break; }
+  }
+  if (eocd < 0) throw new Error("ZIP end record was not found");
+  const eocdView = new DataView(tail.buffer, tail.byteOffset + eocd, tail.length - eocd);
+  let count = u16(eocdView, 10); let centralSize = u32(eocdView, 12); let centralOffset = u32(eocdView, 16);
+  if (count === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
+    const locatorAt = eocd - 20;
+    if (locatorAt < 0 || tail[locatorAt] !== 0x50 || tail[locatorAt + 1] !== 0x4b || tail[locatorAt + 2] !== 0x06 || tail[locatorAt + 3] !== 0x07) throw new Error("ZIP64 locator was not found");
+    const locator = new DataView(tail.buffer, tail.byteOffset + locatorAt, 20);
+    const zip64Offset = u64(locator, 8);
+    const zip64 = new DataView(await file.slice(zip64Offset, zip64Offset + 56).arrayBuffer());
+    if (u32(zip64, 0) !== 0x06064b50) throw new Error("ZIP64 end record was not found");
+    count = u64(zip64, 32); centralSize = u64(zip64, 40); centralOffset = u64(zip64, 48);
+  }
+  if (centralSize > 64 * 1024 * 1024) throw new Error("ZIP directory is too large to inspect safely");
+  const central = new Uint8Array(await file.slice(centralOffset, centralOffset + centralSize).arrayBuffer());
+  const decoder = new TextDecoder();
+  let cursor = 0; const candidates = [];
+  while (cursor + 46 <= central.length && candidates.length < count) {
+    const view = new DataView(central.buffer, central.byteOffset + cursor, central.length - cursor);
+    if (u32(view, 0) !== 0x02014b50) break;
+    const flags = u16(view, 8); const method = u16(view, 10); let compressedSize = u32(view, 20); let uncompressedSize = u32(view, 24);
+    const nameLength = u16(view, 28); const extraLength = u16(view, 30); const commentLength = u16(view, 32); let localOffset = u32(view, 42);
+    const name = decoder.decode(central.subarray(cursor + 46, cursor + 46 + nameLength));
+    const extraAt = cursor + 46 + nameLength;
+    const extra = zip64Extra(central, extraAt, extraLength);
+    if (extra && (uncompressedSize === 0xffffffff || compressedSize === 0xffffffff || localOffset === 0xffffffff)) {
+      let zipCursor = extra.offset; const zipView = new DataView(central.buffer, central.byteOffset + zipCursor, extra.size);
+      if (uncompressedSize === 0xffffffff) { uncompressedSize = u64(zipView, zipCursor - extra.offset); zipCursor += 8; }
+      if (compressedSize === 0xffffffff) { compressedSize = u64(zipView, zipCursor - extra.offset); zipCursor += 8; }
+      if (localOffset === 0xffffffff) localOffset = u64(zipView, zipCursor - extra.offset);
+    }
+    if (!name.endsWith("/") && /\.(json|gdu|du|du0|txt)$/i.test(name)) candidates.push({ name, flags, method, compressedSize, uncompressedSize, localOffset });
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  if (!candidates.length) throw new Error("ZIP contains no supported GDU JSON or GNU DU report");
+  if (candidates.length > 1) throw new Error("ZIP contains multiple reports. Create an archive with one report file.");
+  const entry = candidates[0];
+  if (entry.flags & 1) throw new Error("Encrypted ZIP entries are not supported");
+  if (![0, 8].includes(entry.method)) throw new Error("ZIP entry uses an unsupported compression method");
+  const header = new DataView(await file.slice(entry.localOffset, entry.localOffset + 30).arrayBuffer());
+  if (u32(header, 0) !== 0x04034b50) throw new Error("ZIP local file header was not found");
+  const dataStart = entry.localOffset + 30 + u16(header, 26) + u16(header, 28);
+  const source = file.slice(dataStart, dataStart + entry.compressedSize).stream();
+  return { name: entry.name, stream: entry.method === 8 ? source.pipeThrough(new DecompressionStream("deflate-raw")) : source };
+}
+
+async function openStream(file, limit) {
+  const archive = await detectArchive(file);
+  if (archive === "plain") return { name: file.name, stream: file.stream(), archive };
+  if (archive === "gzip") return { name: file.name.replace(/\.gz$/i, ""), stream: file.stream().pipeThrough(new DecompressionStream("gzip")), archive };
+  if (archive === "zip") { const entry = await readZipEntry(file); return { ...entry, archive }; }
+  try {
+    const module = await import("https://esm.sh/xz-decompress@0.2.3");
+    const XzReadableStream = module.XzReadableStream;
+    if (!XzReadableStream) throw new Error("XZ decoder did not load");
+    return { name: file.name.replace(/\.xz$/i, ""), stream: new XzReadableStream(file.stream()), archive };
+  } catch (error) {
+    throw new Error("Unable to load the XZ decoder. Check this page can reach esm.sh, then retry. " + error.message);
+  }
+}
+
+function streamLimit(stream, maxBytes, onBytes) {
+  let used = 0;
+  return stream.pipeThrough(new TransformStream({ transform(chunk, controller) { used += chunk.byteLength; if (used > maxBytes) throw new Error("Decompressed data exceeded the selected safety limit"); onBytes(used); controller.enqueue(chunk); } }));
+}
+
+function createJsonSax() {
+  const parser = { onopenarray: null, onopenobject: null, onkey: null, onvalue: null, onclosearray: null, oncloseobject: null };
+  const stack = []; let rootState = "value"; let state = "default"; let token = ""; let unicode = "";
+  const error = message => { throw new Error("Invalid JSON export: " + message); };
+  const isWhitespace = character => /\s/.test(character);
+  const isDelimiter = character => isWhitespace(character) || "[]{}:,".includes(character);
+  const finishValue = () => {
+    if (stack.length) stack[stack.length - 1].state = "commaOrEnd";
+    else rootState = "done";
+  };
+  const openContainer = type => {
+    if (stack.length >= JSON_DEPTH_LIMIT) error("nesting limit exceeded");
+    finishValue();
+    if (type === "array") { parser.onopenarray?.(); stack.push({ type, state: "valueOrEnd" }); }
+    else { parser.onopenobject?.(); stack.push({ type, state: "keyOrEnd" }); }
+  };
+  const closeContainer = type => {
+    const frame = stack.pop();
+    if (!frame || frame.type !== type) error("unexpected closing token");
+    if (type === "array") parser.onclosearray?.(); else parser.oncloseobject?.();
+  };
+  const emitValue = value => { parser.onvalue?.(value); finishValue(); };
+  const scalar = item => item && typeof item === "object" && item.type === "string" ? item.value : item;
+  const consume = item => {
+    const frame = stack[stack.length - 1];
+    if (!frame) {
+      if (rootState !== "value") error("multiple root values");
+      if (item === "[") return openContainer("array");
+      if (item === "{") return openContainer("object");
+      return emitValue(scalar(item));
+    }
+    if (frame.type === "array") {
+      if (frame.state === "valueOrEnd") {
+        if (item === "]") return closeContainer("array");
+        if (item === "[") return openContainer("array");
+        if (item === "{") return openContainer("object");
+        return emitValue(scalar(item));
+      }
+      if (frame.state === "commaOrEnd") {
+        if (item === ",") { frame.state = "valueOrEnd"; return; }
+        if (item === "]") return closeContainer("array");
+      }
+      return error("expected comma or closing array");
+    }
+    if (frame.state === "keyOrEnd") {
+      if (item === "}") return closeContainer("object");
+      if (typeof item !== "object" || item.type !== "string") return error("expected object key");
+      parser.onkey?.(item.value); frame.state = "colon"; return;
+    }
+    if (frame.state === "colon") {
+      if (item !== ":") return error("expected colon");
+      frame.state = "value"; return;
+    }
+    if (frame.state === "value") {
+      if (item === "[") return openContainer("array");
+      if (item === "{") return openContainer("object");
+      return emitValue(scalar(item));
+    }
+    if (frame.state === "commaOrEnd") {
+      if (item === ",") { frame.state = "keyOrEnd"; return; }
+      if (item === "}") return closeContainer("object");
+    }
+    return error("expected comma or closing object");
+  };
+  const emitAtom = value => {
+    if (value === "true") return consume(true);
+    if (value === "false") return consume(false);
+    if (value === "null") return consume(null);
+    const number = Number(value);
+    if (!Number.isFinite(number)) error("invalid value " + value);
+    consume(number);
+  };
+  parser.write = input => {
+    for (let index = 0; index < input.length; index++) {
+      const character = input[index];
+      if (state === "string") {
+        if (character === "\\") { state = "escape"; continue; }
+        if (character === '"') { consume({ type: "string", value: token }); token = ""; state = "default"; continue; }
+        token += character; if (token.length > JSON_TOKEN_LIMIT) error("string token is too large"); continue;
+      }
+      if (state === "escape") {
+        if (character === "u") { unicode = ""; state = "unicode"; continue; }
+        const escaped = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }[character];
+        if (escaped === undefined) error("invalid string escape");
+        token += escaped; state = "string"; continue;
+      }
+      if (state === "unicode") {
+        if (!/[0-9a-fA-F]/.test(character)) error("invalid unicode escape");
+        unicode += character;
+        if (unicode.length === 4) { token += String.fromCharCode(parseInt(unicode, 16)); state = "string"; }
+        continue;
+      }
+      if (state === "atom") {
+        if (!isDelimiter(character)) { token += character; if (token.length > 128) error("scalar token is too large"); continue; }
+        emitAtom(token); token = ""; state = "default"; index--;
+        continue;
+      }
+      if (isWhitespace(character)) continue;
+      if (character === '"') { token = ""; state = "string"; continue; }
+      if ("[]{}:,".includes(character)) { consume(character); continue; }
+      if (character === "-" || /[0-9tfn]/.test(character)) { token = character; state = "atom"; continue; }
+      error("unexpected character");
+    }
+  };
+  parser.close = () => {
+    if (state === "atom") { emitAtom(token); state = "default"; }
+    if (state !== "default" || stack.length || rootState !== "done") error("incomplete document");
+  };
+  return parser;
+}
+
+async function parseGdu(stream, snapshot, progress) {
+  const parser = createJsonSax();
+  const stack = []; const batch = []; const parentBatch = new Set(); const extensionCounts = new Map(); const ageCounts = new Map();
+  const importTime = Date.now(); let files = 0; let directories = 0; let decoded = 0; let root = null; let failed = null;
+  const flush = async () => { if (batch.length) { await putBatch(snapshot.id, batch.splice(0), parentBatch); parentBatch.clear(); } };
+  const nearestDirectory = (skip = 0) => { for (let index = stack.length - 1 - skip; index >= 0; index--) if (stack[index].type === "array" && stack[index].dir) return stack[index]; return null; };
+  const addFile = (frame, props) => {
+    if (!frame.dir || !props.name) return;
+    const path = childPath(frame.dir.path, props.name); const disk = finiteNumber(props.dsize); const apparent = finiteNumber(props.asize); const ext = extension(path);
+    const kind = props.notreg ? "other" : "file";
+    batch.push({ snapshotId: snapshot.id, path, parentPath: frame.dir.path, treeParent: frame.dir.path, name: normalizePath(props.name), kind, disk, apparent, mtime: finiteNumber(props.mtime), ext, flags: props.notreg ? "notreg" : props.hlnkc ? "hardlink" : "" });
+    frame.disk += disk; frame.apparent += apparent; if (kind === "file") { frame.files++; files++; extensionCounts.set(ext, (extensionCounts.get(ext) || 0) + disk); const age = ageBucket(props.mtime, importTime); ageCounts.set(age, (ageCounts.get(age) || 0) + 1); }
+  };
+  parser.onopenarray = () => { const parent = stack[stack.length - 1]; const index = parent && parent.type === "array" ? parent.items++ : -1; stack.push({ type: "array", index, items: 0, dir: null, disk: 0, apparent: 0, files: 0, directories: 0 }); };
+  parser.onopenobject = key => { const parent = stack[stack.length - 1]; const index = parent && parent.type === "array" ? parent.items++ : -1; stack.push({ type: "object", index, props: {}, key: key || null }); };
+  parser.onkey = key => { const frame = stack[stack.length - 1]; if (frame && frame.type === "object") frame.key = key; };
+  parser.onvalue = value => { const frame = stack[stack.length - 1]; if (frame && frame.type === "object" && frame.key !== null) frame.props[frame.key] = value; else if (frame && frame.type === "array") frame.items++; };
+  parser.oncloseobject = () => {
+    const object = stack.pop(); const parent = stack[stack.length - 1]; if (!parent || parent.type !== "array") return;
+    if (object.index === 0 && object.props.name) {
+      const parentDir = nearestDirectory(1); const path = parentDir ? childPath(parentDir.dir.path, object.props.name) : "";
+      parent.dir = { path, name: normalizePath(object.props.name), mtime: finiteNumber(object.props.mtime) };
+    } else addFile(parent, object.props);
+  };
+  parser.onclosearray = () => {
+    const frame = stack.pop(); if (!frame.dir) return;
+    const directory = { snapshotId: snapshot.id, path: frame.dir.path, parentPath: frame.dir.path ? parentPath(frame.dir.path) : "", treeParent: frame.dir.path ? parentPath(frame.dir.path) : "", name: frame.dir.name || "/", kind: "directory", disk: frame.disk, apparent: frame.apparent, mtime: frame.dir.mtime, ext: "", flags: "", files: frame.files, directories: frame.directories };
+    batch.push(directory); directories++;
+    if (!frame.dir.path) root = directory;
+    const parent = nearestDirectory(); if (parent) { parent.disk += frame.disk; parent.apparent += frame.apparent; parent.files += frame.files; parent.directories += frame.directories + 1; }
+  };
+  parser.onerror = error => { failed = error; parser.resume(); };
+  const reader = stream.getReader(); const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read(); if (done) break;
+    decoded += value.byteLength; const text = decoder.decode(value, { stream: true });
+    for (let offset = 0; offset < text.length; offset += JSON_WRITE_CHUNK) { parser.write(text.slice(offset, offset + JSON_WRITE_CHUNK)); if (failed) throw failed; if (batch.length >= CHUNK_BATCH) await flush(); }
+    progress({ phase: "indexing", decoded, records: files + directories });
+  }
+  parser.write(decoder.decode()); parser.close(); if (failed) throw failed; await flush();
+  if (!root) throw new Error("The JSON is not a complete GDU export. Use gdu -o snapshot.gdu.json /path without --summarize, --top, or --depth.");
+  return { totalDisk: root.disk, totalApparent: root.apparent, files, directories, qualifiedCounts: false, unknownLeaves: 0, extensions: topMap(extensionCounts), ages: topMap(ageCounts), decoded };
+}
+
+function ageBucket(timestamp, now = Date.now()) {
+  if (!timestamp) return "unknown";
+  const days = (now - Number(timestamp) * 1000) / 86400000;
+  if (days < 30) return "under 30 days";
+  if (days < 365) return "30 days to 1 year";
+  if (days < 1095) return "1 to 3 years";
+  return "over 3 years";
+}
+function topMap(map) { return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, value]) => ({ name, value })); }
+
+async function classifyDu(snapshotId, progress) {
+  const db = await dbReady; let directories = 0; let unknown = 0; let totalDisk = 0; let totalApparent = 0; let largest = 0; let records = 0; let afterPath = null;
+  while (true) {
+    const rows = await readSnapshotBatch(snapshotId, afterPath); if (!rows.length) break; const tx = db.transaction(["nodes", "parents"], "readwrite"); const nodes = tx.objectStore("nodes"); const parents = tx.objectStore("parents");
+    for (const node of rows) {
+      const markerRequest = parents.get([snapshotId, node.path]); const parentRequest = nodes.get([snapshotId, node.parentPath]); let markerReady = false; let parentReady = false; let marker = null; let parent = null;
+      const update = () => { if (!markerReady || !parentReady) return; if (marker) { node.kind = "directory"; directories++; } else { node.kind = "unknown"; unknown++; } if (!parent && node.path) node.treeParent = ""; nodes.put(node); records++; if (node.disk > largest) { largest = node.disk; totalDisk = node.disk; totalApparent = node.apparent; } };
+      markerRequest.onsuccess = () => { marker = markerRequest.result; markerReady = true; update(); }; parentRequest.onsuccess = () => { parent = parentRequest.result; parentReady = true; update(); };
+    }
+    await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "classifying", decoded: 0, records });
+  }
+  await deleteIndexRecords("parents", "snapshot", snapshotId); return { totalDisk, totalApparent, directories, files: null, qualifiedCounts: true, unknownLeaves: unknown, extensions: [], ages: [], decoded: 0 };
+}
+
+async function parseDu(stream, snapshot, progress) {
+  let buffer = ""; let batch = []; const parentBatch = new Set(); let records = 0; let decoded = 0;
+  const processRecord = line => {
+    if (!line) return; const pieces = line.split("\t"); if (pieces.length < 2) return;
+    const disk = finiteNumber(pieces[0]); const hasTime = pieces.length > 2 && /^\d+$/.test(pieces[1]); const rawPath = pieces.slice(hasTime ? 2 : 1).join("\t"); const path = normalizePath(rawPath); if (!path) return;
+    const parent = parentPath(path); batch.push({ snapshotId: snapshot.id, path, parentPath: parent, treeParent: parent, name: path.slice(path.lastIndexOf("/") + 1), kind: "unknown", disk, apparent: disk, mtime: hasTime ? finiteNumber(pieces[1]) : 0, ext: extension(path), flags: "" });
+    if (parent) parentBatch.add(parent); records++;
+  };
+  const flush = async () => { if (batch.length) { await putBatch(snapshot.id, batch, parentBatch); batch = []; parentBatch.clear(); } };
+  const reader = stream.getReader(); const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read(); if (done) break;
+    decoded += value.byteLength; buffer += decoder.decode(value, { stream: true }); let start = 0; let split;
+    while ((split = buffer.indexOf("\0", start)) !== -1) { processRecord(buffer.slice(start, split)); start = split + 1; if (batch.length >= CHUNK_BATCH) await flush(); }
+    if (start) buffer = buffer.slice(start); if (buffer.length > DU_RECORD_LIMIT) throw new Error("GNU DU record exceeded the 4 MiB safety limit");
+    progress({ phase: "indexing", decoded, records });
+  }
+  buffer += decoder.decode(); processRecord(buffer); await flush(); if (!records) throw new Error("No GNU DU NUL-delimited records were found");
+  const summary = await classifyDu(snapshot.id, progress); summary.decoded = decoded; return summary;
+}
+
+async function importSnapshot({ snapshot, file, format, limit }) {
+  const startedAt = Date.now();
+  await putSnapshot({ ...snapshot, status: "indexing", createdAt: startedAt, fileName: file.name, fileSize: file.size, format, summary: null });
+  const report = await openStream(file, limit); const resolvedFormat = format === "auto" ? formatFromName(report.name) : format; const progress = progressReporter(snapshot.id);
+  const limited = streamLimit(report.stream, limit, decoded => progress({ phase: "decompressing", decoded, records: 0 }));
+  const summary = resolvedFormat === "du" ? await parseDu(limited, snapshot, progress) : await parseGdu(limited, snapshot, progress);
+  const stored = { ...snapshot, status: "ready", createdAt: startedAt, completedAt: Date.now(), fileName: file.name, reportName: report.name, fileSize: file.size, archive: report.archive, format: resolvedFormat, summary };
+  progress({ phase: "finishing", decoded: summary.decoded, records: (summary.files || 0) + summary.directories + (summary.unknownLeaves || 0) }, true); await putSnapshot(stored); postMessage({ type: "imported", snapshot: stored });
+}
+
+async function scanBaseline(comparisonId, baselineId, progress) {
+  const db = await dbReady; let count = 0; let afterPath = null;
+  while (true) { const rows = await readSnapshotBatch(baselineId, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
+    for (const node of rows) { const beforeFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; changes.put({ comparisonId, path: node.path, treeParent: node.treeParent, name: node.name, kind: node.kind, before: node.disk, after: 0, delta: -node.disk, beforeFiles, afterFiles: beforeFiles === null ? null : 0, deltaFiles: beforeFiles === null ? null : -beforeFiles, percent: node.disk ? -100 : 0, status: "removed", beforeMtime: node.mtime }); count++; }
+    await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching baseline", records: count });
+  }
+  return count;
+}
+
+async function scanComparison(comparisonId, comparisonIdSnapshot, progress) {
+  const db = await dbReady; let count = 0; let afterPath = null; const growth = []; const shrink = []; const statuses = { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 };
+  while (true) { const rows = await readSnapshotBatch(comparisonIdSnapshot, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
+    for (const node of rows) { const get = changes.get([comparisonId, node.path]); get.onsuccess = () => { const previous = get.result; const before = previous ? previous.before : 0; const delta = node.disk - before; const afterFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; const beforeFiles = previous ? previous.beforeFiles : afterFiles === null ? null : 0; const deltaFiles = beforeFiles === null || afterFiles === null ? null : afterFiles - beforeFiles; let status = "unchanged"; if (!previous) status = "added"; else if (delta > 0) status = "grown"; else if (delta < 0) status = "shrunk"; else if (previous.beforeMtime !== node.mtime || deltaFiles) status = "changed"; const row = { comparisonId, path: node.path, treeParent: node.treeParent, name: node.name, kind: node.kind, before, after: node.disk, delta, beforeFiles, afterFiles, deltaFiles, percent: before ? delta / before * 100 : node.disk ? null : 0, status }; changes.put(row); statuses[status] = (statuses[status] || 0) + 1; updateTop(growth, row, "growth"); updateTop(shrink, row, "shrink"); count++; }; }
+    await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching comparison", records: count });
+  }
+  return { count, growth, shrink, statuses };
+}
+
+async function collectRemoved(comparisonId, growth, shrink) {
+  const db = await dbReady; const tx = db.transaction("changes", "readonly"); const index = tx.objectStore("changes").index("status"); let removed = 0; await new Promise((resolve, reject) => { const req = index.openCursor(IDBKeyRange.only([comparisonId, "removed"])); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); removed++; updateTop(shrink, cursor.value, "shrink"); cursor.continue(); }; }); await transactionDone(tx); return removed;
+}
+
+async function compareSnapshots({ id, baseline, comparison }) {
+  const db = await dbReady; const tx = db.transaction("snapshots", "readonly"); const snapshots = tx.objectStore("snapshots"); const base = await request(snapshots.get(baseline)); const current = await request(snapshots.get(comparison)); await transactionDone(tx); if (!base || !current || base.status !== "ready" || current.status !== "ready") throw new Error("Both snapshots must finish indexing before comparison");
+  const progress = progressReporter(id); progress({ phase: "starting comparison", records: 0 }, true); await scanBaseline(id, baseline, progress); const result = await scanComparison(id, comparison, progress); result.statuses.removed = await collectRemoved(id, result.growth, result.shrink);
+  const summary = { before: base.summary.totalDisk, after: current.summary.totalDisk, delta: current.summary.totalDisk - base.summary.totalDisk, percent: base.summary.totalDisk ? (current.summary.totalDisk - base.summary.totalDisk) / base.summary.totalDisk * 100 : null, directories: { before: base.summary.directories, after: current.summary.directories, delta: current.summary.directories - base.summary.directories }, files: { before: base.summary.files, after: current.summary.files, delta: base.summary.files === null || current.summary.files === null ? null : current.summary.files - base.summary.files, unknown: (base.summary.unknownLeaves || 0) + (current.summary.unknownLeaves || 0) }, statuses: result.statuses };
+  const comparisonRecord = { id, baseline, comparison, createdAt: Date.now(), summary, growth: result.growth, shrink: result.shrink, properties: { baseline: base.summary.extensions || [], comparison: current.summary.extensions || [], baselineAges: base.summary.ages || [], comparisonAges: current.summary.ages || [] } }; const write = db.transaction("comparisons", "readwrite"); write.objectStore("comparisons").put(comparisonRecord); await transactionDone(write); postMessage({ type: "compared", comparison: comparisonRecord, snapshots: { baseline: base, comparison: current } });
+}
+
+let work = Promise.resolve();
+self.onmessage = event => {
+  const message = event.data;
+  work = work.then(async () => {
+    if (message.type === "import") await importSnapshot(message);
+    if (message.type === "compare") await compareSnapshots(message);
+    if (message.type === "cleanup-snapshot") await cleanupSnapshot(message.snapshotId);
+    if (message.type === "cleanup-comparison") await cleanupComparison(message.comparisonId);
+    if (message.type === "prune") await pruneData(message.snapshotIds || [], message.comparisonId);
+  }).catch(async error => { try { if (message.type === "import") await cleanupSnapshot(message.snapshot?.id); if (message.type === "compare") await cleanupComparison(message.id); } catch {} postMessage({ type: "error", snapshotId: message.snapshot?.id || message.id, message: error.message || String(error) }); });
+};
+  </script>
+
+  <script>
+    const DB_NAME = "dudiff-local-v1";
+    const DB_VERSION = 1;
+    const state = { baseline: null, comparison: null, worker: null, processing: false, comparing: false, comparisonId: null, currentPath: "", currentRow: null, selectedPath: null, selectedTreeIndex: -1, treeRows: [], treeSort: { key: "before", direction: -1 }, treeLoad: 0, treeTransaction: null, treeViewport: { start: -1, end: -1 }, searchResults: [], searchActiveIndex: -1, searchToken: 0, searchTransaction: null, comparisonRecord: null };
+    const $ = selector => document.querySelector(selector);
+    const treeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    let treeScrollFrame = 0; let tooltipFrame = 0; let tooltipPoint = null; let tooltipSize = { width: 0, height: 0 };
+    const els = { baselineFile: $("#baseline-file"), comparisonFile: $("#comparison-file"), baselineMeta: $("#baseline-meta"), comparisonMeta: $("#comparison-meta"), baselineProgress: $("#baseline-progress"), comparisonProgress: $("#comparison-progress"), importButton: $("#import-button"), clearButton: $("#clear-button"), sidebarToggle: $("#sidebar-toggle"), format: $("#format"), limit: $("#limit"), storage: $("#storage-status"), reportEmpty: $("#report-empty"), reportLoading: $("#report-loading"), reportLoadingDetail: $("#report-loading-detail"), workspace: $("#workspace"), comparisonStrip: $("#comparison-strip"), metrics: $("#metrics"), tree: $("#tree"), breadcrumbs: $("#breadcrumbs"), treeSearch: $("#tree-search"), treeSearchResults: $("#tree-search-results"), treeSelectedChange: $("#tree-selected-change"), treeSelectedBefore: $("#tree-selected-before"), treeSelectedFiles: $("#tree-selected-files"), treeSelectedFileChange: $("#tree-selected-file-change"), growth: $("#growth-list"), shrink: $("#shrink-list"), properties: $("#properties"), ages: $("#ages"), snapshotLine: $("#snapshot-line"), pathTooltip: $("#path-tooltip"), toast: $("#toast") };
+
+    function request(request) { return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error || new Error("Database request failed")); }); }
+    function transactionDone(transaction) { return new Promise((resolve, reject) => { transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error || new Error("Database transaction failed")); transaction.onabort = () => reject(transaction.error || new Error("Database transaction aborted")); }); }
+    let dbReady;
+    try {
+      const openRequest = indexedDB.open(DB_NAME, DB_VERSION);
+      openRequest.onupgradeneeded = () => {
+        const db = openRequest.result;
+        const snapshots = db.createObjectStore("snapshots", { keyPath: "id" }); snapshots.createIndex("createdAt", "createdAt");
+        const nodes = db.createObjectStore("nodes", { keyPath: ["snapshotId", "path"] }); nodes.createIndex("snapshot", "snapshotId"); nodes.createIndex("tree", ["snapshotId", "treeParent"]);
+        const parents = db.createObjectStore("parents", { keyPath: ["snapshotId", "path"] }); parents.createIndex("snapshot", "snapshotId");
+        db.createObjectStore("comparisons", { keyPath: "id" });
+        const changes = db.createObjectStore("changes", { keyPath: ["comparisonId", "path"] }); changes.createIndex("comparison", "comparisonId"); changes.createIndex("tree", ["comparisonId", "treeParent"]); changes.createIndex("status", ["comparisonId", "status"]);
+      };
+      dbReady = request(openRequest);
+    } catch (error) {
+      dbReady = Promise.reject(error);
+      dbReady.catch(() => {});
+    }
+
+    function bytes(value) {
+      const number = Number(value || 0); const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]; let index = 0; let size = Math.abs(number);
+      while (size >= 1024 && index < units.length - 1) { size /= 1024; index++; }
+      return (number < 0 ? "-" : "") + (index ? size.toFixed(size >= 10 ? 1 : 2) : size.toFixed(0)) + " " + units[index];
+    }
+    function signedBytes(value) { return (value > 0 ? "+" : "") + bytes(value); }
+    function percent(value) { return value === null || value === undefined ? "New" : (value > 0 ? "+" : "") + value.toFixed(1) + "%"; }
+    function id() { return crypto.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + "-" + Math.random().toString(16).slice(2); }
+    function escapeHtml(value) { return String(value).replace(/[&<>\"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[character])); }
+    function toast(message, error = false) { els.toast.textContent = message; els.toast.className = "toast" + (error ? " error" : ""); clearTimeout(toast.timer); toast.timer = setTimeout(() => els.toast.classList.add("hidden"), 6500); }
+    function renderBuildTime() { const date = new Date(document.lastModified); if (Number.isNaN(date.getTime())) return; $("#build-time").textContent = new Intl.DateTimeFormat("en-AU", { timeZone: "Australia/Brisbane", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date) + " AEST"; }
+    function setSidebarCollapsed(collapsed) { document.body.classList.toggle("sidebar-collapsed", collapsed); els.sidebarToggle.setAttribute("aria-expanded", String(!collapsed)); const label = collapsed ? "Expand snapshot panel" : "Collapse snapshot panel"; els.sidebarToggle.setAttribute("aria-label", label); els.sidebarToggle.title = label; }
+
+    async function checkStorage() {
+      if (!window.indexedDB) { els.storage.textContent = "Browser storage unavailable"; toast("This browser does not provide IndexedDB for this page.", true); return false; }
+      try { await dbReady; const estimate = await navigator.storage?.estimate?.(); if (estimate) { const available = Math.max(0, (estimate.quota || 0) - (estimate.usage || 0)); els.storage.textContent = "Browser storage: " + bytes(available) + " available of " + bytes(estimate.quota); navigator.storage.persist?.(); } else { els.storage.textContent = "Browser local storage is available"; } return true; } catch (error) { els.storage.textContent = "Browser storage unavailable"; toast("IndexedDB could not open for this page. Use HTTPS or localhost if your browser blocks local-file storage. " + error.message, true); return false; }
+    }
+
+    function fileSelected(role, file) {
+      state[role] = file || null; const meta = role === "baseline" ? els.baselineMeta : els.comparisonMeta;
+      setUploadProgress(role, 0); meta.textContent = file ? file.name + " · " + bytes(file.size) + "\nReady to process" : "No file selected"; els.importButton.disabled = !(state.baseline && state.comparison);
+      if (file) processSnapshot(role).catch(error => { state.processing = false; stopProcessing(); toast(error.message, true); });
+    }
+    function snapshotMeta(snapshot) {
+      const summary = snapshot.summary; const files = summary.files === null ? "at least " + Number(summary.unknownLeaves || 0).toLocaleString() + " unclassified leaves" : Number(summary.files || 0).toLocaleString() + " files";
+      return snapshot.fileName + " · " + bytes(snapshot.fileSize) + "\n" + bytes(summary.totalDisk) + " disk usage · " + Number(summary.directories || 0).toLocaleString() + " directories · " + files;
+    }
+    function setDropZone(role) {
+      const drop = $("#" + role + "-drop"); const input = $("#" + role + "-file"); input.addEventListener("change", () => fileSelected(role, input.files[0]));
+      ["dragenter", "dragover"].forEach(type => drop.addEventListener(type, event => { event.preventDefault(); drop.classList.add("dragover"); }));
+      ["dragleave", "drop"].forEach(type => drop.addEventListener(type, event => { event.preventDefault(); drop.classList.remove("dragover"); }));
+      drop.addEventListener("drop", event => { const file = event.dataTransfer.files[0]; if (file) { input.files = event.dataTransfer.files; fileSelected(role, file); } });
+    }
+
+    function snapshotRole(snapshotId) { return snapshotId === state.baselineId ? "baseline" : snapshotId === state.comparisonId ? "comparison" : null; }
+    function setUploadProgress(role, percent, stateName = "", message = "") {
+      const ring = role === "baseline" ? els.baselineProgress : els.comparisonProgress; if (!ring) return;
+      const value = Math.max(0, Math.min(100, Math.round(percent))); ring.style.setProperty("--progress", value); ring.className = "upload-ring" + (stateName ? " " + stateName : ""); ring.querySelector("span").textContent = value ? value + "%" : "--"; ring.setAttribute("aria-label", (role === "baseline" ? "Baseline" : "Comparison") + " upload progress" + (value ? ": " + value + "%" : "") + (message ? ", " + message : ""));
+    }
+    function updateJob(jobId, label, message, ratio) { const role = snapshotRole(jobId); if (role) setUploadProgress(role, Math.max(1, ratio * 100), "active", message); }
+    function showProcessing(message = "Reading reports locally into browser storage") { els.workspace.classList.add("hidden"); els.workspace.classList.remove("entering"); els.reportEmpty.classList.remove("hidden"); els.reportEmpty.setAttribute("aria-busy", "true"); els.reportLoading.setAttribute("aria-hidden", "false"); els.reportLoadingDetail.textContent = message; requestAnimationFrame(() => els.reportEmpty.classList.add("loading")); }
+    function stopProcessing() { els.reportEmpty.classList.remove("loading"); els.reportEmpty.removeAttribute("aria-busy"); els.reportLoading.setAttribute("aria-hidden", "true"); }
+
+    function createWorker() {
+      state.worker?.terminate(); const source = $("#worker-source").textContent; const workerUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" })); const worker = new Worker(workerUrl);
+      worker.onmessage = event => handleWorkerMessage(event.data); worker.onmessageerror = () => toast("Worker could not return a result to this page.", true); worker.onerror = event => { event.preventDefault(); toast("Worker failed: " + (event.message || "unknown startup error"), true); }; state.worker = worker; return worker;
+    }
+    function handleWorkerMessage(message) {
+      if (message.type === "progress") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; const file = role ? state[role] : null; const ratio = file?.size ? Math.min(.98, (message.decoded || 0) / file.size) : .35; const detail = message.phase.replace("indexing", "processing") + " · " + Number(message.records || 0).toLocaleString() + " records"; updateJob(message.snapshotId, role === "baseline" ? "Baseline" : "Comparison", detail, ratio); els.reportLoadingDetail.textContent = detail; }
+      if (message.type === "imported") { const role = snapshotRole(message.snapshot.id); if (!role) return; state[role + "ReadyId"] = message.snapshot.id; (role === "baseline" ? els.baselineMeta : els.comparisonMeta).textContent = snapshotMeta(message.snapshot); setUploadProgress(role, 100, "ready", "Processing complete"); if (state.baselineReadyId && state.comparisonReadyId) startComparison(); else els.reportLoadingDetail.textContent = (role === "baseline" ? "Baseline" : "Comparison") + " ready · choose the other snapshot"; }
+      if (message.type === "compared") { if (message.comparison.id !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; els.importButton.disabled = false; state.comparisonRecord = message.comparison; state.snapshots = message.snapshots; state.worker.postMessage({ type: "prune", snapshotIds: [message.comparison.baseline, message.comparison.comparison], comparisonId: message.comparison.id }); renderWorkspace(); }
+      if (message.type === "error") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; if (role) setUploadProgress(role, 100, "error", "Import failed"); stopProcessing(); toast(message.message, true); els.importButton.disabled = !(state.baseline && state.comparison); }
+    }
+
+    async function processSnapshot(role) {
+      const file = state[role]; if (!file || !await checkStorage()) return; if (!state.worker) createWorker();
+      const previousSnapshotId = state[role + "ReadyId"] || state[role + "Id"]; const snapshotId = id(); if (previousSnapshotId && previousSnapshotId !== snapshotId) state.worker.postMessage({ type: "cleanup-snapshot", snapshotId: previousSnapshotId });
+      state.processing = true; state.comparisonRecord = null; state.comparisonIdRecord = null; state.comparing = false; state[role + "Id"] = snapshotId; state[role + "ReadyId"] = null; els.importButton.disabled = true; showProcessing("Processing " + role + " snapshot"); setUploadProgress(role, 1, "active", "Processing");
+      state.worker.postMessage({ type: "import", snapshot: { id: snapshotId, label: role === "baseline" ? "Baseline" : "Comparison" }, file, format: els.format.value, limit: Number(els.limit.value) });
+    }
+    async function startImport() {
+      if (!state.baseline || !state.comparison || !await checkStorage()) return; const previousSnapshotIds = new Set([state.baselineReadyId || state.baselineId, state.comparisonReadyId || state.comparisonId].filter(Boolean)); state.processing = true; state.comparing = false; state.comparisonRecord = null; els.importButton.disabled = true; showProcessing(); state.baselineId = id(); state.comparisonId = id(); state.baselineReadyId = null; state.comparisonReadyId = null; state.comparisonIdRecord = null; setUploadProgress("baseline", 1, "active", "Waiting to process"); setUploadProgress("comparison", 1, "active", "Waiting to process"); const worker = createWorker(); for (const snapshotId of previousSnapshotIds) worker.postMessage({ type: "cleanup-snapshot", snapshotId }); const format = els.format.value; const limit = Number(els.limit.value);
+      worker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit });
+      worker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit });
+    }
+    function startComparison() { if (state.comparing || !state.baselineReadyId || !state.comparisonReadyId) return; const previousComparisonId = state.comparisonRecord?.id; const comparisonId = id(); state.comparing = true; state.comparisonIdRecord = comparisonId; els.reportLoadingDetail.textContent = "Comparing filesystem properties"; if (previousComparisonId && previousComparisonId !== comparisonId) state.worker.postMessage({ type: "cleanup-comparison", comparisonId: previousComparisonId }); state.worker.postMessage({ type: "compare", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId }); }
+
+    function metric(label, value, note, tone = "") { return '<article class="metric"><div class="metric-label">' + escapeHtml(label) + '</div><div class="metric-value ' + tone + '">' + escapeHtml(value) + '</div><div class="metric-note">' + escapeHtml(note) + '</div></article>'; }
+    function countText(snapshot, type) { if (type === "files" && snapshot.summary.files === null) return "at least " + Number(snapshot.summary.unknownLeaves || 0).toLocaleString(); return Number(snapshot.summary[type] || 0).toLocaleString(); }
+    function comparisonFileCard(snapshot, label) { return '<div class="comparison-file"><span class="comparison-file-label">' + label + '</span><span class="comparison-file-name" title="' + escapeHtml(snapshot.fileName) + '">' + escapeHtml(snapshot.fileName) + '</span><span class="comparison-file-meta">' + escapeHtml(bytes(snapshot.fileSize)) + ' source · ' + escapeHtml(bytes(snapshot.summary.totalDisk)) + ' disk · ' + escapeHtml(countText(snapshot, "directories")) + ' dirs · ' + escapeHtml(countText(snapshot, "files")) + ' files</span></div>'; }
+    function renderWorkspace() {
+      const comparison = state.comparisonRecord; const summary = comparison.summary; const baseline = state.snapshots.baseline; const current = state.snapshots.comparison; const tone = summary.delta > 0 ? "gain" : summary.delta < 0 ? "reclaim" : "";
+      els.comparisonStrip.innerHTML = comparisonFileCard(baseline, "Baseline") + '<div class="comparison-arrow" aria-hidden="true"><svg class="action-icon" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></div>' + comparisonFileCard(current, "Comparison");
+      els.metrics.innerHTML = metric("Baseline storage", bytes(summary.before), baseline.fileName) + metric("Comparison storage", bytes(summary.after), current.fileName) + metric("Storage change", signedBytes(summary.delta), summary.delta > 0 ? "more disk usage" : summary.delta < 0 ? "less disk usage" : "no change", tone) + metric("Percentage change", percent(summary.percent), summary.percent === null ? "baseline was empty" : "relative to baseline", tone) + metric("Directories / files", signedCount(summary.directories.delta) + " / " + (summary.files.delta === null ? "qualified" : signedCount(summary.files.delta)), countText(baseline, "directories") + " dirs · " + countText(baseline, "files") + " files");
+      els.snapshotLine.textContent = baseline.format.toUpperCase() + " / " + current.format.toUpperCase() + " · processed locally";
+      state.currentPath = decodePathHash(); state.selectedPath = null; els.treeSearch.value = ""; closeTreeSearch(); renderTop(els.growth, comparison.growth, "No paths increased storage."); renderTop(els.shrink, comparison.shrink, "No paths reduced storage."); renderProperties(comparison.properties); stopProcessing(); els.reportEmpty.classList.add("hidden"); setSidebarCollapsed(true); els.workspace.classList.remove("hidden", "entering"); requestAnimationFrame(() => els.workspace.classList.add("entering")); loadTree(); els.workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    function signedCount(value) { return (value > 0 ? "+" : "") + Number(value || 0).toLocaleString(); }
+    function renderTop(element, rows, empty) { if (!rows?.length) { element.innerHTML = '<li class="empty">' + empty + '</li>'; return; } element.innerHTML = rows.slice(0, 8).map(row => '<li class="list-item"><span class="list-path" title="' + escapeHtml(row.path || "/") + '">' + escapeHtml(row.path || "/") + '</span><span class="list-value ' + (row.delta > 0 ? "gain" : "reclaim") + '">' + escapeHtml(signedBytes(row.delta)) + '</span></li>').join(""); }
+    function renderProperties(properties) {
+      const extensions = [...(properties.baseline || []).map(item => ({ ...item, side: "baseline" })), ...(properties.comparison || []).map(item => ({ ...item, side: "comparison" }))].slice(0, 8);
+      const ages = [...(properties.baselineAges || []).map(item => ({ ...item, side: "baseline" })), ...(properties.comparisonAges || []).map(item => ({ ...item, side: "comparison" }))].slice(0, 8);
+      els.properties.innerHTML = extensions.length ? extensions.map(item => '<div class="property"><span class="property-name">' + escapeHtml(item.name) + '</span><span class="property-value">' + escapeHtml(bytes(item.value)) + " · " + item.side + '</span></div>').join("") : '<div class="empty">Extension reporting is available for GDU exports.</div>';
+      els.ages.innerHTML = ages.length ? ages.map(item => '<div class="property"><span class="property-name">' + escapeHtml(item.name) + '</span><span class="property-value">' + Number(item.value).toLocaleString() + " files · " + item.side + '</span></div>').join("") : '<div class="empty">Age reporting is available for GDU exports with modification times.</div>';
+    }
+
+    async function directoryChanges(parent) {
+      try { state.treeTransaction?.abort(); } catch {} const db = await dbReady; const tx = db.transaction("changes", "readonly"); state.treeTransaction = tx; const store = tx.objectStore("changes"); const index = store.index("tree");
+      try { const [rows, current] = await Promise.all([request(index.getAll(IDBKeyRange.only([state.comparisonRecord.id, parent]))), request(store.get([state.comparisonRecord.id, parent]))]); await transactionDone(tx); return { rows: rows.filter(row => row.path !== parent), current: current || null }; }
+      finally { if (state.treeTransaction === tx) state.treeTransaction = null; }
+    }
+    function compareTreeRows(left, right) {
+      const key = state.treeSort.key; const direction = state.treeSort.direction; let result;
+      if (key === "name") result = treeCollator.compare(left.name, right.name);
+      else if (key === "status") result = left.status.localeCompare(right.status);
+      else { if (left[key] === null || left[key] === undefined) return right[key] === null || right[key] === undefined ? treeCollator.compare(left.name, right.name) : 1; if (right[key] === null || right[key] === undefined) return -1; result = left[key] - right[key]; }
+      if (!result && key !== "name") result = treeCollator.compare(left.name, right.name);
+      return result * direction;
+    }
+    function decodePathHash() { try { return location.hash.length > 1 ? decodeURIComponent(location.hash.slice(1)) : ""; } catch { return ""; } }
+    function parentOf(path) { const separator = path.lastIndexOf("/"); return separator === -1 ? "" : path.slice(0, separator); }
+    function navigateTree(path, writeHistory = true, selectedPath = null) {
+      state.currentPath = path; state.selectedPath = selectedPath; closeTreeSearch();
+      if (writeHistory) { try { history.pushState({ path }, "", path ? "#" + encodeURIComponent(path) : location.pathname + location.search); } catch {} }
+      loadTree();
+    }
+    function selectedTreeRow() { return state.selectedTreeIndex >= 0 ? state.treeRows[state.selectedTreeIndex] : state.currentRow; }
+    function fileCount(value) { return value === null || value === undefined ? "--" : Number(value).toLocaleString(); }
+    function signedFileCount(value) { return value === null || value === undefined ? "--" : (value > 0 ? "+" : "") + Number(value).toLocaleString(); }
+    function renderTreeSummary() { const row = selectedTreeRow(); const fallback = state.comparisonRecord?.summary; els.treeSelectedBefore.textContent = bytes(row ? row.before : fallback?.before || 0); els.treeSelectedChange.textContent = signedBytes(row ? row.delta : fallback?.delta || 0); els.treeSelectedFiles.textContent = fileCount(row ? row.beforeFiles : fallback?.files?.before); els.treeSelectedFileChange.textContent = signedFileCount(row ? row.deltaFiles : fallback?.files?.delta); }
+    function selectTreeRow(path, reveal = false) {
+      state.selectedPath = path; state.selectedTreeIndex = state.treeRows.findIndex(row => row.path === path); renderTreeSummary();
+      els.tree.querySelectorAll(".tree-row[data-path]").forEach(row => row.setAttribute("aria-selected", String(row.dataset.path === path)));
+      if (reveal) { revealTreeSelection(); els.tree.focus({ preventScroll: true }); }
+    }
+    function renderBreadcrumbs() {
+      const segments = state.currentPath ? state.currentPath.split("/") : []; const crumbs = [{ label: "/", path: "" }]; let path = "";
+      for (const segment of segments) { path = path ? path + "/" + segment : segment; crumbs.push({ label: segment, path }); }
+      els.breadcrumbs.innerHTML = crumbs.map((crumb, index) => (index ? '<span class="crumb-separator">/</span>' : "") + '<button class="breadcrumb" data-path="' + escapeHtml(crumb.path) + '"' + (crumb.path === state.currentPath ? ' aria-current="page"' : "") + '>' + escapeHtml(crumb.label) + '</button>').join("");
+    }
+    async function loadTree() {
+      if (!state.comparisonRecord) return;
+      const load = ++state.treeLoad;
+      let result; try { result = await directoryChanges(state.currentPath); } catch (error) { if (error?.name === "AbortError") return; throw error; }
+      if (load !== state.treeLoad) return;
+      if (!result.current && state.currentPath) { state.currentPath = ""; state.selectedPath = null; try { history.replaceState({ path: "" }, "", location.pathname + location.search); } catch {} loadTree(); return; }
+      state.currentRow = result.current; state.treeRows = result.rows.sort(compareTreeRows); state.selectedTreeIndex = state.selectedPath ? state.treeRows.findIndex(row => row.path === state.selectedPath) : -1;
+      if (state.selectedPath && state.selectedTreeIndex < 0) state.selectedPath = null;
+      renderBreadcrumbs(); renderTree(); renderTreeSummary();
+    }
+    function sortButton(label, key, className = "") { const active = state.treeSort.key === key; const arrow = active ? state.treeSort.direction > 0 ? " ↑" : " ↓" : ""; return '<button class="sort-button ' + className + '" data-sort="' + key + '" data-active="' + active + '">' + label + arrow + '</button>'; }
+    function setTreeSort(key) { state.treeSort.direction = state.treeSort.key === key ? -state.treeSort.direction : key === "name" || key === "status" ? 1 : -1; state.treeSort.key = key; state.treeRows.sort(compareTreeRows); state.selectedTreeIndex = state.selectedPath ? state.treeRows.findIndex(row => row.path === state.selectedPath) : -1; renderTree(); }
+    function treeIcon(kind) { return kind === "directory" ? '<svg class="tree-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2h7A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>' : '<svg class="tree-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 2h8l5 5v15H6z"/><path fill="#fff" d="M14 2v6h5"/></svg>'; }
+    function treeRowHtml(row, index, total) {
+      const directory = row.kind === "directory"; const bar = Math.max(2, Math.min(100, Math.max(row.before, row.after) / Math.max(total, 1) * 100)); const deltaTone = row.delta > 0 ? " delta-positive" : row.delta < 0 ? " delta-negative" : "";
+      const fileTone = row.deltaFiles > 0 ? " delta-positive" : row.deltaFiles < 0 ? " delta-negative" : "";
+      return '<button class="tree-row ' + (directory ? "directory" : "file") + '" role="treeitem" aria-selected="' + (row.path === state.selectedPath) + '"' + (directory ? ' aria-expanded="false"' : "") + ' data-path="' + escapeHtml(row.path) + '" style="transform:translateY(' + (index * 36) + 'px);--bar:' + bar + '%"><span class="tree-path">' + treeIcon(row.kind) + '<span class="tree-kind">' + (directory ? "DIR" : "FILE") + '</span><span class="tree-name" data-full-path="' + escapeHtml(row.path || "/") + '">' + escapeHtml(row.name || "/") + '</span></span><span class="tree-cell">' + escapeHtml(bytes(row.before)) + '</span><span class="tree-cell' + deltaTone + '">' + escapeHtml(signedBytes(row.delta)) + '</span><span class="tree-cell">' + escapeHtml(fileCount(row.beforeFiles)) + '</span><span class="tree-cell' + fileTone + '">' + escapeHtml(signedFileCount(row.deltaFiles)) + '</span></button>';
+    }
+    function renderTree() {
+      const rows = state.treeRows; const head = '<div class="tree-head"><div class="tree-name-head"><button class="tree-parent-btn" data-parent type="button" aria-label="Go to parent directory"' + (!state.currentPath ? " disabled" : "") + '>↑</button>' + sortButton("Name", "name", "path-sort") + '</div><div>' + sortButton("Baseline size", "before") + '</div><div>' + sortButton("Size change", "delta") + '</div><div>' + sortButton("Baseline files", "beforeFiles") + '</div><div>' + sortButton("File change", "deltaFiles") + '</div></div>';
+      state.treeViewport = { start: -1, end: -1 }; els.tree.scrollTop = 0;
+      if (!rows.length) { els.tree.innerHTML = head + '<div class="empty">No entries in this directory.</div>'; return; }
+      els.tree.innerHTML = head + '<div class="tree-body" style="height:' + (rows.length * 36) + 'px"></div>'; renderVisibleTreeRows(true);
+    }
+    function renderVisibleTreeRows(force = false) {
+      const body = els.tree.querySelector(".tree-body"); if (!body) return; const scrollTop = Math.max(0, els.tree.scrollTop - 32); const height = Math.max(0, els.tree.clientHeight - 32); const start = Math.max(0, Math.floor(scrollTop / 36) - 8); const end = Math.min(state.treeRows.length, Math.ceil((scrollTop + height) / 36) + 8);
+      if (!force && start === state.treeViewport.start && end === state.treeViewport.end) return; state.treeViewport = { start, end };
+      const total = Math.max(state.currentRow?.before || 0, 1); body.innerHTML = state.treeRows.slice(start, end).map((row, offset) => treeRowHtml(row, start + offset, total)).join("");
+    }
+    function revealTreeSelection() { const index = state.selectedTreeIndex; if (index < 0) return; const top = 32 + index * 36; const bottom = top + 36; if (top < els.tree.scrollTop + 32) els.tree.scrollTop = Math.max(0, top - 32); else if (bottom > els.tree.scrollTop + els.tree.clientHeight) els.tree.scrollTop = bottom - els.tree.clientHeight; renderVisibleTreeRows(true); }
+    function positionPathTooltip(event) { tooltipPoint = { x: event.clientX, y: event.clientY }; if (tooltipFrame) return; tooltipFrame = requestAnimationFrame(() => { tooltipFrame = 0; if (!tooltipPoint) return; const gap = 14; els.pathTooltip.style.left = Math.min(tooltipPoint.x + gap, window.innerWidth - tooltipSize.width - 10) + "px"; els.pathTooltip.style.top = Math.min(tooltipPoint.y + gap, window.innerHeight - tooltipSize.height - 10) + "px"; }); }
+    function hidePathTooltip() { tooltipPoint = null; els.pathTooltip.classList.remove("visible"); }
+    function enterSelected() { const row = state.selectedTreeIndex >= 0 ? state.treeRows[state.selectedTreeIndex] : null; if (row?.kind === "directory") navigateTree(row.path); }
+    function moveSelection(step) { if (!state.treeRows.length) return; const origin = state.selectedTreeIndex < 0 ? step > 0 ? -1 : state.treeRows.length : state.selectedTreeIndex; const next = Math.max(0, Math.min(state.treeRows.length - 1, origin + step)); selectTreeRow(state.treeRows[next].path, true); }
+    function insertSearchCandidate(results, candidate) { let index = results.length; while (index > 0 && (candidate.score < results[index - 1].score || candidate.score === results[index - 1].score && candidate.row.before > results[index - 1].row.before)) index--; if (index >= 50) return; results.splice(index, 0, candidate); if (results.length > 50) results.pop(); }
+    async function searchTree(query) {
+      const normalized = query.trim().toLowerCase(); const token = ++state.searchToken; if (!normalized) return closeTreeSearch(); try { state.searchTransaction?.abort(); } catch {}
+      const terms = normalized.split(/\s+/).filter(Boolean); const results = []; const db = await dbReady; const tx = db.transaction("changes", "readonly"); state.searchTransaction = tx; const index = tx.objectStore("changes").index("comparison");
+      try { await new Promise((resolve, reject) => { const cursor = index.openCursor(IDBKeyRange.only(state.comparisonRecord.id)); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item) return resolve(); const row = item.value; const text = (row.name + " " + row.path).toLowerCase(); if (terms.every(term => text.includes(term))) { const name = row.name.toLowerCase(); const score = name === normalized ? 0 : name.startsWith(normalized) ? 1 : name.includes(normalized) ? 2 : 3; insertSearchCandidate(results, { row, score }); } item.continue(); }; }); await transactionDone(tx); }
+      catch (error) { if (error?.name === "AbortError") return; throw error; }
+      finally { if (state.searchTransaction === tx) state.searchTransaction = null; }
+      if (token !== state.searchToken) return;
+      state.searchResults = results.map(result => result.row); state.searchActiveIndex = state.searchResults.length ? 0 : -1; renderTreeSearchResults();
+    }
+    function renderTreeSearchResults() { els.treeSearchResults.hidden = false; els.treeSearch.setAttribute("aria-expanded", "true"); els.treeSearchResults.innerHTML = state.searchResults.length ? state.searchResults.map((row, index) => '<button class="search-result" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-index="' + index + '"><span><span class="search-result-name">' + escapeHtml(row.name || "/") + '</span><span class="search-result-path">' + escapeHtml(row.path || "/") + '</span></span><span class="search-result-meta">' + (row.kind === "directory" ? "DIR" : "FILE") + ' · ' + escapeHtml(bytes(row.before)) + ' · ' + escapeHtml(fileCount(row.beforeFiles)) + ' files</span></button>').join("") : '<div class="empty">No matches</div>'; }
+    function closeTreeSearch() { state.searchToken++; clearTimeout(searchTree.timer); try { state.searchTransaction?.abort(); } catch {} state.searchTransaction = null; state.searchResults = []; state.searchActiveIndex = -1; els.treeSearchResults.hidden = true; els.treeSearch.setAttribute("aria-expanded", "false"); }
+    function updateSearchSelection(step) { if (!state.searchResults.length) return; const previous = state.searchActiveIndex; state.searchActiveIndex = (state.searchActiveIndex + step + state.searchResults.length) % state.searchResults.length; els.treeSearchResults.querySelector('[data-search-index="' + previous + '"]')?.setAttribute("aria-selected", "false"); const active = els.treeSearchResults.querySelector('[data-search-index="' + state.searchActiveIndex + '"]'); active?.setAttribute("aria-selected", "true"); active?.scrollIntoView({ block: "nearest" }); }
+    function activateSearchResult(index = state.searchActiveIndex) { const row = state.searchResults[index]; if (!row) return; els.treeSearch.value = ""; row.kind === "directory" ? navigateTree(row.path) : navigateTree(row.treeParent, true, row.path); els.tree.focus(); }
+    els.tree.addEventListener("click", event => { const parent = event.target.closest("[data-parent]"); if (parent) { navigateTree(parentOf(state.currentPath)); return; } const sort = event.target.closest("[data-sort]"); if (sort) { setTreeSort(sort.dataset.sort); return; } const row = event.target.closest(".tree-row[data-path]"); if (row) selectTreeRow(row.dataset.path); });
+    els.tree.addEventListener("dblclick", event => { const row = event.target.closest(".tree-row[data-path]"); if (!row) return; selectTreeRow(row.dataset.path); enterSelected(); });
+    els.tree.addEventListener("keydown", event => { const page = Math.max(1, Math.floor((els.tree.clientHeight - 32) / 36)); const shortcut = { n: "name", s: "before", d: "delta", f: "beforeFiles", C: "deltaFiles" }[event.key]; if (shortcut && !event.altKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); setTreeSort(shortcut); } else if (event.key === "ArrowDown") { event.preventDefault(); moveSelection(1); } else if (event.key === "ArrowUp") { event.preventDefault(); moveSelection(-1); } else if (event.key === "PageDown") { event.preventDefault(); moveSelection(page); } else if (event.key === "PageUp") { event.preventDefault(); moveSelection(-page); } else if (event.key === "Home") { event.preventDefault(); selectTreeRow(state.treeRows[0]?.path, true); } else if (event.key === "End") { event.preventDefault(); selectTreeRow(state.treeRows.at(-1)?.path, true); } else if (event.key === "Enter" || event.key === "ArrowRight") { event.preventDefault(); enterSelected(); } else if ((event.key === "Backspace" || event.key === "ArrowLeft") && state.currentPath) { event.preventDefault(); navigateTree(parentOf(state.currentPath)); } });
+    els.tree.addEventListener("mouseover", event => { const name = event.target.closest(".tree-name[data-full-path]"); if (!name) return; els.pathTooltip.textContent = name.dataset.fullPath; els.pathTooltip.classList.add("visible"); const rect = els.pathTooltip.getBoundingClientRect(); tooltipSize = { width: rect.width, height: rect.height }; positionPathTooltip(event); });
+    els.tree.addEventListener("mousemove", event => { if (els.pathTooltip.classList.contains("visible")) positionPathTooltip(event); });
+    els.tree.addEventListener("mouseout", event => { if (event.target.closest(".tree-name[data-full-path]")) hidePathTooltip(); });
+    els.tree.addEventListener("scroll", () => { hidePathTooltip(); if (treeScrollFrame) return; treeScrollFrame = requestAnimationFrame(() => { treeScrollFrame = 0; renderVisibleTreeRows(); }); });
+    els.breadcrumbs.addEventListener("click", event => { const crumb = event.target.closest(".breadcrumb[data-path]"); if (crumb) navigateTree(crumb.dataset.path); });
+    els.treeSearch.addEventListener("input", () => { clearTimeout(searchTree.timer); searchTree.timer = setTimeout(() => searchTree(els.treeSearch.value).catch(error => toast(error.message, true)), 250); });
+    els.treeSearch.addEventListener("keydown", event => { if (event.key === "ArrowDown") { event.preventDefault(); updateSearchSelection(1); } else if (event.key === "ArrowUp") { event.preventDefault(); updateSearchSelection(-1); } else if (event.key === "Enter") { event.preventDefault(); activateSearchResult(); } else if (event.key === "Escape") { event.preventDefault(); closeTreeSearch(); els.treeSearch.blur(); } });
+    els.treeSearchResults.addEventListener("mousedown", event => event.preventDefault());
+    els.treeSearchResults.addEventListener("click", event => { const result = event.target.closest("[data-search-index]"); if (result) activateSearchResult(Number(result.dataset.searchIndex)); });
+    document.addEventListener("keydown", event => { if (!state.comparisonRecord || event.target.matches("input,select,textarea")) return; if (event.key === "/" || (event.ctrlKey && event.key.toLocaleLowerCase() === "f")) { event.preventDefault(); els.treeSearch.focus(); els.treeSearch.select(); } });
+    document.addEventListener("click", event => { if (!event.target.closest(".browser-search-wrap")) closeTreeSearch(); });
+    window.addEventListener("popstate", () => { if (!state.comparisonRecord) return; state.currentPath = decodePathHash(); state.selectedPath = null; loadTree(); });
+
+    async function exportCsv() {
+      if (!state.comparisonRecord) return; const button = $("#download-csv"); button.disabled = true;
+      try { const db = await dbReady; const tx = db.transaction("changes", "readonly"); const index = tx.objectStore("changes").index("comparison"); const parts = ["path,status,kind,baseline_bytes,comparison_bytes,delta_bytes,baseline_files,comparison_files,delta_files,percent_change\n"]; let chunk = [];
+        await new Promise((resolve, reject) => { const req = index.openCursor(IDBKeyRange.only(state.comparisonRecord.id)); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); const row = cursor.value; chunk.push([row.path, row.status, row.kind, row.before, row.after, row.delta, row.beforeFiles ?? "", row.afterFiles ?? "", row.deltaFiles ?? "", row.percent === null ? "" : row.percent].map(value => '"' + String(value).replaceAll('"', '""') + '"').join(",")); if (chunk.length >= 1000) { parts.push(chunk.join("\n") + "\n"); chunk = []; } cursor.continue(); }; }); await transactionDone(tx); if (chunk.length) parts.push(chunk.join("\n") + "\n"); const blob = new Blob(parts, { type: "text/csv" }); const link = document.createElement("a"); const url = URL.createObjectURL(blob); link.href = url; link.download = "du-diff-" + new Date().toISOString().slice(0, 10) + ".csv"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 0);
+      } finally { button.disabled = false; }
+    }
+    $("#download-csv").addEventListener("click", () => exportCsv().catch(error => toast(error.message, true)));
+
+    async function clearData() { if (!confirm("Remove all locally indexed snapshots and comparisons for this page?")) return; state.worker?.terminate(); (await dbReady).close(); await new Promise((resolve, reject) => { const req = indexedDB.deleteDatabase(DB_NAME); req.onsuccess = resolve; req.onerror = () => reject(req.error); req.onblocked = () => reject(new Error("Close other du diff tabs, then retry")); }); location.reload(); }
+    els.clearButton.addEventListener("click", () => clearData().catch(error => toast(error.message, true)));
+    els.importButton.addEventListener("click", startImport);
+    els.sidebarToggle.addEventListener("click", () => setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed")));
+    setDropZone("baseline"); setDropZone("comparison"); renderBuildTime(); checkStorage();
+  </script>
+</body>
+</html>
