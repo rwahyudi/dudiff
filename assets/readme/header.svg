@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">du diff, local snapshot comparison</title>
+  <desc id="desc">A local-first disk usage comparison dashboard showing baseline and comparison storage bars, a file tree, and a size change.</desc>
+  <rect width="1200" height="360" rx="24" fill="#111111"/>
+  <path d="M0 288h1200" stroke="#303533"/>
+  <g transform="translate(58 54)">
+    <text x="0" y="15" fill="#9aa39e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" letter-spacing="2">LOCAL SNAPSHOT COMPARISON</text>
+    <text x="0" y="86" fill="#fbfbfa" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="64" font-weight="700" letter-spacing="-3">du diff</text>
+    <text x="0" y="133" fill="#d6dcda" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="21">See exactly where disk usage changed.</text>
+    <rect x="0" y="178" width="310" height="42" rx="6" fill="#1f6c9f"/>
+    <text x="18" y="205" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">browser-only · streaming · IndexedDB</text>
+  </g>
+  <g transform="translate(714 44)">
+    <rect width="428" height="248" rx="12" fill="#fbfbfa"/>
+    <rect x="1" y="1" width="426" height="37" rx="11" fill="#f0f3f0"/>
+    <circle cx="23" cy="19" r="5" fill="#d95757"/>
+    <circle cx="42" cy="19" r="5" fill="#d5a63b"/>
+    <circle cx="61" cy="19" r="5" fill="#5a9d63"/>
+    <text x="88" y="24" fill="#68716c" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">du diff / comparison</text>
+    <text x="24" y="67" fill="#787774" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" letter-spacing="1">BASELINE → COMPARISON</text>
+    <rect x="24" y="83" width="242" height="19" rx="4" fill="#e1f3fe"/>
+    <rect x="24" y="83" width="184" height="19" rx="4" fill="#1f6c9f"/>
+    <text x="280" y="97" fill="#111111" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">412 GiB</text>
+    <rect x="24" y="119" width="302" height="19" rx="4" fill="#fdebec"/>
+    <rect x="24" y="119" width="258" height="19" rx="4" fill="#9f2f2d"/>
+    <text x="340" y="133" fill="#111111" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">+74 GiB</text>
+    <path d="M24 170h380M24 195h380M24 220h380" stroke="#e5e8e5"/>
+    <path d="M34 170h17M34 195h17M34 220h17" stroke="#1f6c9f" stroke-width="3"/>
+    <path d="M64 170h130M64 195h218M64 220h96" stroke="#87908a" stroke-width="7" stroke-linecap="round"/>
+    <text x="322" y="174" fill="#787774" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">file tree</text>
+    <text x="322" y="199" fill="#787774" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">streamed parse</text>
+    <text x="322" y="224" fill="#787774" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">local data</text>
+  </g>
+  <text x="58" y="326" fill="#78827c" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">GDU JSON  ·  GNU DU  ·  .gz / .zip / .xz</text>
+</svg>

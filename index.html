@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111111'/%3E%3Crect x='11' y='15' width='33' height='13' rx='4' fill='%23fbfbfa'/%3E%3Ccircle cx='18' cy='21.5' r='2.5' fill='%231f6c9f'/%3E%3Crect x='11' y='36' width='44' height='13' rx='4' fill='%23e1f3fe'/%3E%3Ccircle cx='18' cy='42.5' r='2.5' fill='%231f6c9f'/%3E%3Cpath d='M44 36h7a4 4 0 0 1 4 4v5a4 4 0 0 1-4 4h-7z' fill='%23d95757'/%3E%3C/svg%3E">
   <title>du diff</title>
   <style>
     :root {
@@ -148,10 +149,11 @@
     .workspace-head { display: flex; gap: 18px; align-items: end; justify-content: space-between; margin-bottom: 10px; }
     .workspace-title { margin: 0; font-size: 22px; }
     .snapshot-line { color: var(--muted); font-size: 12px; text-align: right; }
-    .comparison-strip { min-height:58px; display:grid; grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr); align-items:center; gap:10px; margin-bottom:10px; padding:9px 12px; border:1px solid var(--rule); border-radius:7px; background:var(--surface); }
+    .comparison-strip { min-height:76px; display:grid; grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr); align-items:center; gap:10px; margin-bottom:10px; padding:9px 12px; border:1px solid var(--rule); border-radius:7px; background:var(--surface); }
     .comparison-file { min-width:0; }
     .comparison-file-label { display:block; color:var(--muted); font-size:9px; letter-spacing:.06em; text-transform:uppercase; }
     .comparison-file-name { display:block; margin-top:3px; overflow:hidden; font-size:12px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+    .comparison-file-date { display:block; width:max-content; max-width:100%; margin-top:5px; overflow:hidden; border-radius:4px; padding:4px 7px; background:var(--blue-bg); color:var(--blue); font:650 11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; text-overflow:ellipsis; white-space:nowrap; }
     .comparison-file-meta { display:block; margin-top:3px; overflow:hidden; color:var(--muted); font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; text-overflow:ellipsis; white-space:nowrap; }
     .comparison-arrow { display:grid; place-items:center; color:var(--blue); }
     .comparison-arrow .action-icon { width:20px; height:20px; }
@@ -212,7 +214,8 @@
     .tree-cell.delta-positive { color:var(--red); font-weight:650; }
     .tree-cell.delta-negative { color:var(--green); font-weight:650; }
     .tree-head { min-width:var(--tree-min-width); min-height:32px; display:grid; grid-template-columns:var(--tree-columns); align-items:center; gap:8px; position:sticky; top:0; z-index:5; border-bottom:1px solid var(--fb-line); padding:0 10px 0 12px; background:#f6f7f5; color:var(--fb-muted); box-shadow:0 6px 12px rgba(25,35,30,.06); font-size:10px; font-weight:650; text-transform:uppercase; }
-    .tree-name-head { min-width:0; display:flex; align-items:center; gap:7px; }
+    .tree-head-cell { position:relative; min-width:0; align-self:stretch; display:flex; align-items:center; }
+    .tree-name-head { gap:7px; }
     .tree-parent-btn { width:24px; height:24px; flex:0 0 auto; display:grid; place-items:center; border:1px solid var(--fb-line); border-radius:6px; background:var(--surface); color:var(--fb-muted); padding:0; }
     .tree-parent-btn:hover:not(:disabled) { color:var(--fb-ink); border-color:var(--fb-accent); }
     .tree-parent-btn:disabled { opacity:.42; cursor:default; }
@@ -220,6 +223,11 @@
     .sort-button:hover { color:var(--fb-ink); }
     .sort-button[data-active="true"] { color:var(--fb-accent); }
     .sort-button.path-sort { flex:1; text-align:left; }
+    .tree-column-resizer { position:absolute; z-index:3; top:0; right:-8px; bottom:0; width:8px; border:0; padding:0; background:transparent; cursor:col-resize; touch-action:none; }
+    .tree-column-resizer::after { content:""; position:absolute; top:5px; bottom:5px; left:3px; width:1px; background:#cdd2ce; transition:background 120ms ease; }
+    .tree-column-resizer:hover::after,.tree-column-resizer:focus-visible::after,.tree-column-resizer.active::after { background:var(--fb-accent); }
+    .tree-column-resizer:focus-visible { outline:2px solid var(--fb-accent); outline-offset:-2px; }
+    body.tree-column-resizing { cursor:col-resize; user-select:none; }
     .side-stack { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-content:start; }
     .path-tooltip { position:fixed; z-index:100; max-width:min(620px,calc(100vw - 24px)); padding:7px 9px; border:1px solid #ccd2ce; border-radius:5px; background:#202521; color:#fff; box-shadow:0 8px 24px rgba(20,30,25,.2); font:10px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; pointer-events:none; opacity:0; transform:translateY(3px); transition:opacity 100ms ease,transform 100ms ease; }
     .path-tooltip.visible { opacity:1; transform:translateY(0); }
@@ -655,7 +663,7 @@ function createJsonSax() {
 async function parseGdu(stream, snapshot, progress) {
   const parser = createJsonSax();
   const stack = []; const batch = []; const parentBatch = new Set(); const extensionCounts = new Map(); const ageCounts = new Map();
-  const importTime = Date.now(); let files = 0; let directories = 0; let decoded = 0; let root = null; let failed = null;
+  let ageReference = Date.now(); let takenAt = 0; let files = 0; let directories = 0; let decoded = 0; let root = null; let failed = null;
   const flush = async () => { if (batch.length) { await putBatch(snapshot.id, batch.splice(0), parentBatch); parentBatch.clear(); } };
   const nearestDirectory = (skip = 0) => { for (let index = stack.length - 1 - skip; index >= 0; index--) if (stack[index].type === "array" && stack[index].dir) return stack[index]; return null; };
   const addFile = (frame, props) => {
@@ -663,7 +671,7 @@ async function parseGdu(stream, snapshot, progress) {
     const path = childPath(frame.dir.path, props.name); const disk = finiteNumber(props.dsize); const apparent = finiteNumber(props.asize); const ext = extension(path);
     const kind = props.notreg ? "other" : "file";
     batch.push({ snapshotId: snapshot.id, path, shard: pathShard(path), parentPath: frame.dir.path, treeParent: frame.dir.path, name: normalizePath(props.name), kind, disk, apparent, mtime: finiteNumber(props.mtime), ext, flags: props.notreg ? "notreg" : props.hlnkc ? "hardlink" : "" });
-    frame.disk += disk; frame.apparent += apparent; if (kind === "file") { frame.files++; files++; extensionCounts.set(ext, (extensionCounts.get(ext) || 0) + disk); const age = ageBucket(props.mtime, importTime); ageCounts.set(age, (ageCounts.get(age) || 0) + 1); }
+    frame.disk += disk; frame.apparent += apparent; if (kind === "file") { frame.files++; files++; extensionCounts.set(ext, (extensionCounts.get(ext) || 0) + disk); const age = ageBucket(props.mtime, ageReference); ageCounts.set(age, (ageCounts.get(age) || 0) + 1); }
   };
   parser.onopenarray = () => { const parent = stack[stack.length - 1]; const index = parent && parent.type === "array" ? parent.items++ : -1; stack.push({ type: "array", index, items: 0, dir: null, disk: 0, apparent: 0, files: 0, directories: 0 }); };
   parser.onopenobject = key => { const parent = stack[stack.length - 1]; const index = parent && parent.type === "array" ? parent.items++ : -1; stack.push({ type: "object", index, props: {}, key: key || null }); };
@@ -671,6 +679,7 @@ async function parseGdu(stream, snapshot, progress) {
   parser.onvalue = value => { const frame = stack[stack.length - 1]; if (frame && frame.type === "object" && frame.key !== null) frame.props[frame.key] = value; else if (frame && frame.type === "array") frame.items++; };
   parser.oncloseobject = () => {
     const object = stack.pop(); const parent = stack[stack.length - 1]; if (!parent || parent.type !== "array") return;
+    if (object.props.progname === "gdu") { const timestamp = finiteNumber(object.props.timestamp); if (timestamp) { takenAt = timestamp * 1000; ageReference = takenAt; } }
     if (object.index === 0 && object.props.name) {
       const parentDir = nearestDirectory(1); const path = parentDir ? childPath(parentDir.dir.path, object.props.name) : "";
       parent.dir = { path, name: normalizePath(object.props.name), mtime: finiteNumber(object.props.mtime) };
@@ -693,7 +702,7 @@ async function parseGdu(stream, snapshot, progress) {
   }
   parser.write(decoder.decode()); parser.close(); if (failed) throw failed; await flush();
   if (!root) throw new Error("The JSON is not a complete GDU export. Use gdu -o snapshot.gdu.json /path without --summarize, --top, or --depth.");
-  return { totalDisk: root.disk, totalApparent: root.apparent, files, directories, qualifiedCounts: false, unknownLeaves: 0, extensions: topMap(extensionCounts), ages: topMap(ageCounts), decoded };
+  return { totalDisk: root.disk, totalApparent: root.apparent, files, directories, qualifiedCounts: false, unknownLeaves: 0, extensions: topMap(extensionCounts), ages: topMap(ageCounts), decoded, takenAt };
 }
 
 function ageBucket(timestamp, now = Date.now()) {
@@ -746,8 +755,8 @@ async function importSnapshot({ snapshot, file, format, limit }) {
   await putSnapshot({ ...snapshot, status: "indexing", createdAt: startedAt, fileName: file.name, fileSize: file.size, format, summary: null });
   const report = await openStream(file, limit); const resolvedFormat = format === "auto" ? formatFromName(report.name) : format; const progress = progressReporter(snapshot.id);
   const limited = streamLimit(report.stream, limit, decoded => progress({ phase: "decompressing", decoded, records: 0 }));
-  const summary = resolvedFormat === "du" ? await parseDu(limited, snapshot, progress) : await parseGdu(limited, snapshot, progress);
-  const stored = { ...snapshot, status: "ready", createdAt: startedAt, completedAt: Date.now(), fileName: file.name, reportName: report.name, fileSize: file.size, archive: report.archive, format: resolvedFormat, summary };
+  const parsed = resolvedFormat === "du" ? await parseDu(limited, snapshot, progress) : await parseGdu(limited, snapshot, progress); const { takenAt: reportTakenAt = 0, ...summary } = parsed; const fileModifiedAt = finiteNumber(file.lastModified); const takenAt = reportTakenAt || fileModifiedAt || null;
+  const stored = { ...snapshot, status: "ready", createdAt: startedAt, completedAt: Date.now(), takenAt, takenAtSource: reportTakenAt ? "report" : fileModifiedAt ? "file" : null, fileName: file.name, reportName: report.name, fileSize: file.size, archive: report.archive, format: resolvedFormat, summary };
   progress({ phase: "finishing", decoded: summary.decoded, records: (summary.files || 0) + summary.directories + (summary.unknownLeaves || 0) }, true); await putSnapshot(stored); postMessage({ type: "imported", snapshot: stored });
 }
 
@@ -826,6 +835,9 @@ self.onmessage = event => {
     const state = { baseline: null, comparison: null, workers: {}, parallelImports: (navigator.hardwareConcurrency || 2) >= 4, processing: false, comparing: false, comparisonRun: null, comparisonId: null, currentPath: "", currentRow: null, selectedPath: null, selectedTreeIndex: -1, treeRows: [], treeSort: { key: "before", direction: -1 }, treeLoad: 0, treeTransaction: null, treeViewport: { start: -1, end: -1 }, searchResults: [], searchActiveIndex: -1, searchToken: 0, searchTransaction: null, comparisonRecord: null };
     const $ = selector => document.querySelector(selector);
     const treeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    const snapshotTimeFormatter = new Intl.DateTimeFormat("en-AU", { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" });
+    const treeColumnMinimums = [180, 96, 96, 96, 96];
+    const treeColumnLabels = ["Name", "Baseline size", "Size change", "Baseline files", "File change"];
     let treeScrollFrame = 0; let tooltipFrame = 0; let tooltipPoint = null; let tooltipSize = { width: 0, height: 0 };
     const els = { baselineFile: $("#baseline-file"), comparisonFile: $("#comparison-file"), baselineMeta: $("#baseline-meta"), comparisonMeta: $("#comparison-meta"), baselineProgress: $("#baseline-progress"), comparisonProgress: $("#comparison-progress"), importButton: $("#import-button"), clearButton: $("#clear-button"), sidebarToggle: $("#sidebar-toggle"), format: $("#format"), limit: $("#limit"), storage: $("#storage-status"), reportEmpty: $("#report-empty"), reportLoading: $("#report-loading"), reportLoadingDetail: $("#report-loading-detail"), workspace: $("#workspace"), comparisonStrip: $("#comparison-strip"), metrics: $("#metrics"), tree: $("#tree"), breadcrumbs: $("#breadcrumbs"), treeSearch: $("#tree-search"), treeSearchResults: $("#tree-search-results"), treeSelectedChange: $("#tree-selected-change"), treeSelectedBefore: $("#tree-selected-before"), treeSelectedFiles: $("#tree-selected-files"), treeSelectedFileChange: $("#tree-selected-file-change"), growth: $("#growth-list"), shrink: $("#shrink-list"), properties: $("#properties"), ages: $("#ages"), snapshotLine: $("#snapshot-line"), pathTooltip: $("#path-tooltip"), toast: $("#toast") };
 
@@ -931,7 +943,8 @@ self.onmessage = event => {
 
     function metric(label, value, note, tone = "") { return '<article class="metric"><div class="metric-label">' + escapeHtml(label) + '</div><div class="metric-value ' + tone + '">' + escapeHtml(value) + '</div><div class="metric-note">' + escapeHtml(note) + '</div></article>'; }
     function countText(snapshot, type) { if (type === "files" && snapshot.summary.files === null) return "at least " + Number(snapshot.summary.unknownLeaves || 0).toLocaleString(); return Number(snapshot.summary[type] || 0).toLocaleString(); }
-    function comparisonFileCard(snapshot, label) { return '<div class="comparison-file"><span class="comparison-file-label">' + label + '</span><span class="comparison-file-name" title="' + escapeHtml(snapshot.fileName) + '">' + escapeHtml(snapshot.fileName) + '</span><span class="comparison-file-meta">' + escapeHtml(bytes(snapshot.fileSize)) + ' source · ' + escapeHtml(bytes(snapshot.summary.totalDisk)) + ' disk · ' + escapeHtml(countText(snapshot, "directories")) + ' dirs · ' + escapeHtml(countText(snapshot, "files")) + ' files</span></div>'; }
+    function snapshotTimeHtml(snapshot) { const date = new Date(Number(snapshot.takenAt)); if (!snapshot.takenAt || Number.isNaN(date.getTime())) return '<span class="comparison-file-date">Capture time unavailable</span>'; const action = snapshot.takenAtSource === "file" ? "File modified" : "Captured"; return '<time class="comparison-file-date" datetime="' + date.toISOString() + '">' + action + " · " + escapeHtml(snapshotTimeFormatter.format(date)) + '</time>'; }
+    function comparisonFileCard(snapshot, label) { return '<div class="comparison-file"><span class="comparison-file-label">' + label + '</span><span class="comparison-file-name" title="' + escapeHtml(snapshot.fileName) + '">' + escapeHtml(snapshot.fileName) + '</span>' + snapshotTimeHtml(snapshot) + '<span class="comparison-file-meta">' + escapeHtml(bytes(snapshot.fileSize)) + ' source · ' + escapeHtml(bytes(snapshot.summary.totalDisk)) + ' disk · ' + escapeHtml(countText(snapshot, "directories")) + ' dirs · ' + escapeHtml(countText(snapshot, "files")) + ' files</span></div>'; }
     function renderWorkspace() {
       const comparison = state.comparisonRecord; const summary = comparison.summary; const baseline = state.snapshots.baseline; const current = state.snapshots.comparison; const tone = summary.delta > 0 ? "gain" : summary.delta < 0 ? "reclaim" : "";
       els.comparisonStrip.innerHTML = comparisonFileCard(baseline, "Baseline") + '<div class="comparison-arrow" aria-hidden="true"><svg class="action-icon" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></div>' + comparisonFileCard(current, "Comparison");
@@ -1000,8 +1013,23 @@ self.onmessage = event => {
       const fileTone = row.deltaFiles > 0 ? " delta-positive" : row.deltaFiles < 0 ? " delta-negative" : "";
       return '<button class="tree-row ' + (directory ? "directory" : "file") + '" role="treeitem" aria-selected="' + (row.path === state.selectedPath) + '"' + (directory ? ' aria-expanded="false"' : "") + ' data-path="' + escapeHtml(row.path) + '" style="transform:translateY(' + (index * 36) + 'px);--bar:' + bar + '%"><span class="tree-path">' + treeIcon(row.kind) + '<span class="tree-kind">' + (directory ? "DIR" : "FILE") + '</span><span class="tree-name" data-full-path="' + escapeHtml(row.path || "/") + '">' + escapeHtml(row.name || "/") + '</span></span><span class="tree-cell">' + escapeHtml(bytes(row.before)) + '</span><span class="tree-cell' + deltaTone + '">' + escapeHtml(signedBytes(row.delta)) + '</span><span class="tree-cell">' + escapeHtml(fileCount(row.beforeFiles)) + '</span><span class="tree-cell' + fileTone + '">' + escapeHtml(signedFileCount(row.deltaFiles)) + '</span></button>';
     }
+    function treeColumnWidths() { return [...els.tree.querySelectorAll(".tree-head-cell")].map(cell => cell.getBoundingClientRect().width); }
+    function applyTreeColumnWidths(widths) { if (widths.length !== treeColumnMinimums.length) return; els.tree.style.setProperty("--tree-columns", widths.map((width, index) => "minmax(" + treeColumnMinimums[index] + "px," + Math.max(width, treeColumnMinimums[index]).toFixed(2) + "fr)").join(" ")); }
+    function resizeTreeColumn(index, delta, widths = treeColumnWidths()) {
+      if (index < 0 || index >= widths.length - 1 || widths.length !== treeColumnMinimums.length) return; const next = widths.slice(); const available = next.slice(index + 1).reduce((total, width, offset) => total + Math.max(0, width - treeColumnMinimums[index + 1 + offset]), 0); const change = Math.max(treeColumnMinimums[index] - next[index], Math.min(available, delta)); next[index] += change;
+      if (change > 0 && available) for (let right = index + 1; right < next.length; right++) next[right] -= change * Math.max(0, widths[right] - treeColumnMinimums[right]) / available;
+      else if (change < 0) { const rightTotal = widths.slice(index + 1).reduce((total, width) => total + width, 0); for (let right = index + 1; right < next.length; right++) next[right] += -change * widths[right] / rightTotal; }
+      applyTreeColumnWidths(next);
+    }
+    function beginTreeColumnResize(event, handle) {
+      if (event.button !== 0) return; const index = Number(handle.dataset.resizeColumn); const widths = treeColumnWidths(); if (widths.length !== treeColumnMinimums.length) return; const startX = event.clientX; const pointerId = event.pointerId; let active = true; event.preventDefault(); handle.classList.add("active"); document.body.classList.add("tree-column-resizing"); handle.setPointerCapture(pointerId);
+      const move = moveEvent => { if (active && moveEvent.pointerId === pointerId) resizeTreeColumn(index, moveEvent.clientX - startX, widths); };
+      const stop = stopEvent => { if (!active || stopEvent.pointerId !== pointerId) return; active = false; handle.classList.remove("active"); document.body.classList.remove("tree-column-resizing"); handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", stop); handle.removeEventListener("pointercancel", stop); handle.removeEventListener("lostpointercapture", stop); if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId); };
+      handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", stop); handle.addEventListener("pointercancel", stop); handle.addEventListener("lostpointercapture", stop);
+    }
+    function treeColumnResizeHandle(index) { const label = "Resize " + treeColumnLabels[index] + " and " + treeColumnLabels[index + 1] + " columns"; return '<button class="tree-column-resizer" type="button" data-resize-column="' + index + '" aria-label="' + label + '" title="' + label + '; drag or use Left and Right Arrow keys"></button>'; }
     function renderTree() {
-      const rows = state.treeRows; const head = '<div class="tree-head"><div class="tree-name-head"><button class="tree-parent-btn" data-parent type="button" aria-label="Go to parent directory"' + (!state.currentPath ? " disabled" : "") + '>↑</button>' + sortButton("Name", "name", "path-sort") + '</div><div>' + sortButton("Baseline size", "before") + '</div><div>' + sortButton("Size change", "delta") + '</div><div>' + sortButton("Baseline files", "beforeFiles") + '</div><div>' + sortButton("File change", "deltaFiles") + '</div></div>';
+      const rows = state.treeRows; const head = '<div class="tree-head"><div class="tree-head-cell tree-name-head"><button class="tree-parent-btn" data-parent type="button" aria-label="Go to parent directory"' + (!state.currentPath ? " disabled" : "") + '>↑</button>' + sortButton("Name", "name", "path-sort") + treeColumnResizeHandle(0) + '</div><div class="tree-head-cell">' + sortButton("Baseline size", "before") + treeColumnResizeHandle(1) + '</div><div class="tree-head-cell">' + sortButton("Size change", "delta") + treeColumnResizeHandle(2) + '</div><div class="tree-head-cell">' + sortButton("Baseline files", "beforeFiles") + treeColumnResizeHandle(3) + '</div><div class="tree-head-cell">' + sortButton("File change", "deltaFiles") + '</div></div>';
       state.treeViewport = { start: -1, end: -1 }; els.tree.scrollTop = 0;
       if (!rows.length) { els.tree.innerHTML = head + '<div class="empty">No entries in this directory.</div>'; return; }
       els.tree.innerHTML = head + '<div class="tree-body" style="height:' + (rows.length * 36) + 'px"></div>'; renderVisibleTreeRows(true);
@@ -1030,9 +1058,10 @@ self.onmessage = event => {
     function closeTreeSearch() { state.searchToken++; clearTimeout(searchTree.timer); try { state.searchTransaction?.abort(); } catch {} state.searchTransaction = null; state.searchResults = []; state.searchActiveIndex = -1; els.treeSearchResults.hidden = true; els.treeSearch.setAttribute("aria-expanded", "false"); }
     function updateSearchSelection(step) { if (!state.searchResults.length) return; const previous = state.searchActiveIndex; state.searchActiveIndex = (state.searchActiveIndex + step + state.searchResults.length) % state.searchResults.length; els.treeSearchResults.querySelector('[data-search-index="' + previous + '"]')?.setAttribute("aria-selected", "false"); const active = els.treeSearchResults.querySelector('[data-search-index="' + state.searchActiveIndex + '"]'); active?.setAttribute("aria-selected", "true"); active?.scrollIntoView({ block: "nearest" }); }
     function activateSearchResult(index = state.searchActiveIndex) { const row = state.searchResults[index]; if (!row) return; els.treeSearch.value = ""; row.kind === "directory" ? navigateTree(row.path) : navigateTree(row.treeParent, true, row.path); els.tree.focus(); }
+    els.tree.addEventListener("pointerdown", event => { const handle = event.target.closest("[data-resize-column]"); if (handle) beginTreeColumnResize(event, handle); });
     els.tree.addEventListener("click", event => { const parent = event.target.closest("[data-parent]"); if (parent) { navigateTree(parentOf(state.currentPath)); return; } const sort = event.target.closest("[data-sort]"); if (sort) { setTreeSort(sort.dataset.sort); return; } const row = event.target.closest(".tree-row[data-path]"); if (row) selectTreeRow(row.dataset.path); });
     els.tree.addEventListener("dblclick", event => { const row = event.target.closest(".tree-row[data-path]"); if (!row) return; selectTreeRow(row.dataset.path); enterSelected(); });
-    els.tree.addEventListener("keydown", event => { const page = Math.max(1, Math.floor((els.tree.clientHeight - 32) / 36)); const shortcut = { n: "name", s: "before", d: "delta", f: "beforeFiles", C: "deltaFiles" }[event.key]; if (shortcut && !event.altKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); setTreeSort(shortcut); } else if (event.key === "ArrowDown") { event.preventDefault(); moveSelection(1); } else if (event.key === "ArrowUp") { event.preventDefault(); moveSelection(-1); } else if (event.key === "PageDown") { event.preventDefault(); moveSelection(page); } else if (event.key === "PageUp") { event.preventDefault(); moveSelection(-page); } else if (event.key === "Home") { event.preventDefault(); selectTreeRow(state.treeRows[0]?.path, true); } else if (event.key === "End") { event.preventDefault(); selectTreeRow(state.treeRows.at(-1)?.path, true); } else if (event.key === "Enter" || event.key === "ArrowRight") { event.preventDefault(); enterSelected(); } else if ((event.key === "Backspace" || event.key === "ArrowLeft") && state.currentPath) { event.preventDefault(); navigateTree(parentOf(state.currentPath)); } });
+    els.tree.addEventListener("keydown", event => { const resizeHandle = event.target.closest("[data-resize-column]"); if (resizeHandle) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); resizeTreeColumn(Number(resizeHandle.dataset.resizeColumn), (event.key === "ArrowRight" ? 1 : -1) * (event.shiftKey ? 40 : 12)); } return; } const page = Math.max(1, Math.floor((els.tree.clientHeight - 32) / 36)); const shortcut = { n: "name", s: "before", d: "delta", f: "beforeFiles", C: "deltaFiles" }[event.key]; if (shortcut && !event.altKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); setTreeSort(shortcut); } else if (event.key === "ArrowDown") { event.preventDefault(); moveSelection(1); } else if (event.key === "ArrowUp") { event.preventDefault(); moveSelection(-1); } else if (event.key === "PageDown") { event.preventDefault(); moveSelection(page); } else if (event.key === "PageUp") { event.preventDefault(); moveSelection(-page); } else if (event.key === "Home") { event.preventDefault(); selectTreeRow(state.treeRows[0]?.path, true); } else if (event.key === "End") { event.preventDefault(); selectTreeRow(state.treeRows.at(-1)?.path, true); } else if (event.key === "Enter" || event.key === "ArrowRight") { event.preventDefault(); enterSelected(); } else if ((event.key === "Backspace" || event.key === "ArrowLeft") && state.currentPath) { event.preventDefault(); navigateTree(parentOf(state.currentPath)); } });
     els.tree.addEventListener("mouseover", event => { const name = event.target.closest(".tree-name[data-full-path]"); if (!name) return; els.pathTooltip.textContent = name.dataset.fullPath; els.pathTooltip.classList.add("visible"); const rect = els.pathTooltip.getBoundingClientRect(); tooltipSize = { width: rect.width, height: rect.height }; positionPathTooltip(event); });
     els.tree.addEventListener("mousemove", event => { if (els.pathTooltip.classList.contains("visible")) positionPathTooltip(event); });
     els.tree.addEventListener("mouseout", event => { if (event.target.closest(".tree-name[data-full-path]")) hidePathTooltip(); });

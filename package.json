@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "build": "sudo -n cp index.html /var/www/html/dudiff.html"
+  },
+  "devDependencies": {
+    "shadcn": "^4.16.2"
+  }
+}
