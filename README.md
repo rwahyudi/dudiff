@@ -9,11 +9,24 @@
 </p>
 
 <p align="center">
+  <a href="#try-it-now">Try it now</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#supported-inputs">Supported inputs</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#limitations">Limitations</a>
 </p>
+
+## Try it now
+
+The latest build is hosted on GitHub Pages and runs entirely in your browser:
+
+<p align="center">
+  <a href="https://rwahyudi.github.io/dudiff/">
+    <strong>https://rwahyudi.github.io/dudiff/</strong>
+  </a>
+</p>
+
+Open the link, upload a baseline and a later report, then choose **Process snapshots**. The HTTPS origin gives the page reliable IndexedDB storage, so large reports can be indexed without leaving the browser.
 
 ## What it does
 
@@ -40,7 +53,7 @@ python3 -m http.server 8080
 
 Open [http://localhost:8080](http://localhost:8080), then upload two reports and choose **Process snapshots**.
 
-`localhost` or HTTPS is recommended because browsers provide the most reliable IndexedDB support there. The app also works from `file://` when the browser permits IndexedDB for local files; if storage is unavailable, the interface reports the problem instead of silently falling back.
+The [hosted version](https://rwahyudi.github.io/dudiff/) is the easiest way to use the app — its HTTPS origin gives browsers reliable IndexedDB support. The same `index.html` also works from `localhost` or `file://` when the browser permits IndexedDB for local files; if storage is unavailable, the interface reports the problem instead of silently falling back.
 
 ## Create reports
 
@@ -87,7 +100,7 @@ No application server is involved, and the source reports are not uploaded by th
 
 ## Development
 
-The runtime remains intentionally self-contained in `index.html`. The package script copies that artifact to the local web server document root:
+The runtime remains intentionally self-contained in `index.html`. GitHub Pages serves the file directly from the `master` branch, so the [hosted version](https://rwahyudi.github.io/dudiff/) refreshes automatically on every push. For local iteration, serve the repository with any static HTTP server, or use the package script to copy the artifact to a local web server document root:
 
 ```bash
 npm run build
