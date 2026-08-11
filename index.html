@@ -301,7 +301,7 @@
         <div class="metrics" id="metrics"></div>
         <div class="dashboard">
           <section class="panel file-browser" aria-label="Difference browser">
-            <div class="browser-toolbar"><nav class="breadcrumbs" id="breadcrumbs" aria-label="Current directory"></nav><div class="browser-search-wrap" role="search"><span class="browser-search-key">/</span><input class="browser-search" id="tree-search" type="search" placeholder="Search files and folders" autocomplete="off" aria-label="Search files and folders" aria-controls="tree-search-results" aria-expanded="false"><div class="browser-search-results" id="tree-search-results" role="listbox" hidden></div></div><button class="small-button browser-export" id="download-csv">Export CSV</button></div>
+            <div class="browser-toolbar"><nav class="breadcrumbs" id="breadcrumbs" aria-label="Current directory"></nav><div class="browser-search-wrap" role="search"><span class="browser-search-key">/</span><input class="browser-search" id="tree-search" type="search" placeholder="Search changed files and folders" autocomplete="off" aria-label="Search changed files and folders" aria-controls="tree-search-results" aria-expanded="false"><div class="browser-search-results" id="tree-search-results" role="listbox" hidden></div></div><button class="small-button browser-export" id="download-csv">Export changes CSV</button></div>
             <div class="tree-summary" id="tree-summary"><div class="tree-summary-item"><span class="tree-summary-label">Baseline size</span><span class="tree-summary-value" id="tree-selected-before">0 B</span></div><div class="tree-summary-item"><span class="tree-summary-label">Size change</span><span class="tree-summary-value" id="tree-selected-change">0 B</span></div><div class="tree-summary-item"><span class="tree-summary-label">Baseline files</span><span class="tree-summary-value" id="tree-selected-files">--</span></div><div class="tree-summary-item"><span class="tree-summary-label">File change</span><span class="tree-summary-value" id="tree-selected-file-change">--</span></div></div>
             <div class="tree" id="tree" role="tree" tabindex="0" aria-label="Filesystem difference browser"></div>
           </section>
@@ -321,17 +321,18 @@
 
   <script id="worker-source" type="text/plain">
 const DB_NAME = "dudiff-local-v1";
-const DB_VERSION = 2;
-const CHUNK_BATCH = 350;
-const SCAN_BATCH = 1000;
+const DB_VERSION = 5;
+const CHUNK_BATCH = 4096;
+const NODE_CHUNK_SIZE = 2048;
+const CHANGE_CHUNK_SIZE = 512;
+const CHUNK_BUFFER_LIMIT = 32768;
+const PATH_BUCKETS = 64;
 const TOP_LIMIT = 16;
-const DELETE_BATCH = 1000;
 const DU_RECORD_LIMIT = 4 * 1024 * 1024;
 const JSON_WRITE_CHUNK = 256 * 1024;
 const JSON_TOKEN_LIMIT = 8 * 1024 * 1024;
 const JSON_DEPTH_LIMIT = 4096;
 const PROGRESS_INTERVAL = 150;
-const COMPARISON_SHARDS = 4;
 
 function request(request) {
   return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error || new Error("Database request failed")); });
@@ -341,16 +342,25 @@ function transactionDone(transaction) {
   return new Promise((resolve, reject) => { transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error || new Error("Database transaction failed")); transaction.onabort = () => reject(transaction.error || new Error("Database transaction aborted")); });
 }
 
+function writeTransaction(db, stores) {
+  try { return db.transaction(stores, "readwrite", { durability: "relaxed" }); }
+  catch { return db.transaction(stores, "readwrite"); }
+}
+
 let dbReady;
 try {
   const openRequest = indexedDB.open(DB_NAME, DB_VERSION);
-  openRequest.onupgradeneeded = () => {
-    const db = openRequest.result; const tx = openRequest.transaction; const store = (name, options) => db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, options); const addIndex = (objectStore, name, keyPath) => { if (!objectStore.indexNames.contains(name)) objectStore.createIndex(name, keyPath); };
-    const snapshots = store("snapshots", { keyPath: "id" }); addIndex(snapshots, "createdAt", "createdAt");
-    const nodes = store("nodes", { keyPath: ["snapshotId", "path"] }); addIndex(nodes, "snapshot", "snapshotId"); addIndex(nodes, "tree", ["snapshotId", "treeParent"]); addIndex(nodes, "snapshotShard", ["snapshotId", "shard", "path"]);
-    const parents = store("parents", { keyPath: ["snapshotId", "path"] }); addIndex(parents, "snapshot", "snapshotId");
-    store("comparisons", { keyPath: "id" });
-    const changes = store("changes", { keyPath: ["comparisonId", "path"] }); addIndex(changes, "comparison", "comparisonId"); addIndex(changes, "tree", ["comparisonId", "treeParent"]); addIndex(changes, "status", ["comparisonId", "status"]); addIndex(changes, "statusShard", ["comparisonId", "status", "shard"]);
+  openRequest.onupgradeneeded = event => {
+    const db = openRequest.result;
+    if (event.oldVersion < 5) {
+      for (const name of [...db.objectStoreNames]) db.deleteObjectStore(name);
+      db.createObjectStore("snapshots", { keyPath: "id" });
+      db.createObjectStore("comparisons", { keyPath: "id" });
+      db.createObjectStore("baselineData", { keyPath: ["snapshotId", "type", "bucket", "sequence"] });
+      db.createObjectStore("comparisonData", { keyPath: ["snapshotId", "type", "bucket", "sequence"] });
+      db.createObjectStore("changeChunks", { keyPath: ["comparisonId", "treeParent", "sequence"] });
+      db.createObjectStore("comparisonScratch", { keyPath: ["comparisonId", "bucket", "sequence"] });
+    }
   };
   dbReady = request(openRequest);
 } catch (error) {
@@ -358,16 +368,17 @@ try {
   dbReady.catch(() => {});
 }
 
-async function deleteIndexBatch(storeName, indexName, key) {
-  const db = await dbReady; const tx = db.transaction(storeName, "readwrite"); const index = tx.objectStore(storeName).index(indexName); let deleted = 0;
-  await new Promise((resolve, reject) => { const cursor = index.openCursor(IDBKeyRange.only(key)); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || deleted >= DELETE_BATCH) return resolve(); item.delete(); deleted++; item.continue(); }; });
-  await transactionDone(tx); return deleted;
-}
+function recordRange(id) { return IDBKeyRange.bound([id], [id, []]); }
+function chunkRange(id, type, bucket = null) { return bucket === null ? IDBKeyRange.bound([id, type], [id, type, []]) : IDBKeyRange.bound([id, type, bucket], [id, type, bucket, []]); }
+function scratchRange(id, bucket) { return IDBKeyRange.bound([id, bucket], [id, bucket, []]); }
+function snapshotStore(slot) { return slot === "baseline" ? "baselineData" : "comparisonData"; }
 
-async function deleteIndexRecords(storeName, indexName, key) { while (await deleteIndexBatch(storeName, indexName, key)) {} }
+async function deleteStoreRecords(storeName, id) { const db = await dbReady; const tx = writeTransaction(db, storeName); tx.objectStore(storeName).delete(recordRange(id)); await transactionDone(tx); }
+
+async function storedGenerationIds(storeName) { const db = await dbReady; const tx = db.transaction(storeName, "readonly"); const ids = new Set(); await new Promise((resolve, reject) => { const request = tx.objectStore(storeName).openKeyCursor(); request.onerror = () => reject(request.error); request.onsuccess = () => { const cursor = request.result; if (!cursor) return resolve(); ids.add(cursor.primaryKey[0]); cursor.continue(); }; }); await transactionDone(tx); return ids; }
 
 async function cleanupComparison(comparisonId) {
-  if (!comparisonId) return; await deleteIndexRecords("changes", "comparison", comparisonId); const db = await dbReady; const tx = db.transaction("comparisons", "readwrite"); tx.objectStore("comparisons").delete(comparisonId); await transactionDone(tx);
+  if (!comparisonId) return; await deleteStoreRecords("changeChunks", comparisonId); await deleteStoreRecords("comparisonScratch", comparisonId); const db = await dbReady; const tx = db.transaction("comparisons", "readwrite"); tx.objectStore("comparisons").delete(comparisonId); await transactionDone(tx);
 }
 
 async function comparisonIdsForSnapshot(snapshotId) {
@@ -377,20 +388,21 @@ async function comparisonIdsForSnapshot(snapshotId) {
 
 async function cleanupSnapshot(snapshotId) {
   if (!snapshotId) return; for (const comparisonId of await comparisonIdsForSnapshot(snapshotId)) await cleanupComparison(comparisonId);
-  await deleteIndexRecords("nodes", "snapshot", snapshotId); await deleteIndexRecords("parents", "snapshot", snapshotId); const db = await dbReady; const tx = db.transaction("snapshots", "readwrite"); tx.objectStore("snapshots").delete(snapshotId); await transactionDone(tx);
+  const db = await dbReady; const read = db.transaction("snapshots", "readonly"); const snapshot = await request(read.objectStore("snapshots").get(snapshotId)); await transactionDone(read); if (snapshot?.slot) await deleteStoreRecords(snapshotStore(snapshot.slot), snapshotId); else { await deleteStoreRecords("baselineData", snapshotId); await deleteStoreRecords("comparisonData", snapshotId); } const tx = db.transaction("snapshots", "readwrite"); tx.objectStore("snapshots").delete(snapshotId); await transactionDone(tx);
 }
 
 async function pruneData(snapshotIds, comparisonId) {
   const keepSnapshots = new Set(snapshotIds.filter(Boolean)); const db = await dbReady;
   const comparisonTx = db.transaction("comparisons", "readonly"); const comparisonIds = await request(comparisonTx.objectStore("comparisons").getAllKeys()); await transactionDone(comparisonTx);
   for (const id of comparisonIds) if (id !== comparisonId) await cleanupComparison(id);
+  for (const storeName of ["changeChunks", "comparisonScratch"]) for (const id of await storedGenerationIds(storeName)) if (id !== comparisonId) await deleteStoreRecords(storeName, id);
   const snapshotTx = db.transaction("snapshots", "readonly"); const storedSnapshotIds = await request(snapshotTx.objectStore("snapshots").getAllKeys()); await transactionDone(snapshotTx);
   for (const id of storedSnapshotIds) if (!keepSnapshots.has(id)) await cleanupSnapshot(id);
 }
 
 function progressReporter(snapshotId) {
-  let lastSent = 0; let lastPhase = "";
-  return (payload, force = false) => { const now = performance.now(); if (!force && payload.phase === lastPhase && now - lastSent < PROGRESS_INTERVAL) return; lastSent = now; lastPhase = payload.phase; postMessage({ type: "progress", snapshotId, ...payload }); };
+  let lastSent = 0; const latest = {};
+  return (payload, force = false) => { Object.assign(latest, payload); const now = performance.now(); if (!force && now - lastSent < PROGRESS_INTERVAL) return; lastSent = now; postMessage({ type: "progress", snapshotId, ...latest }); };
 }
 
 function normalizePath(value) {
@@ -401,16 +413,43 @@ function normalizePath(value) {
 function childPath(parent, name) { return parent ? parent + "/" + normalizePath(name) : normalizePath(name); }
 function parentPath(path) { const slash = path.lastIndexOf("/"); return slash === -1 ? "" : path.slice(0, slash); }
 function extension(path) { const name = path.slice(path.lastIndexOf("/") + 1); const dot = name.lastIndexOf("."); return dot > 0 ? name.slice(dot).toLowerCase() : "[none]"; }
-function pathShard(path) { let hash = 2166136261; for (let index = 0; index < path.length; index++) { hash ^= path.charCodeAt(index); hash = Math.imul(hash, 16777619); } return (hash >>> 0) % COMPARISON_SHARDS; }
 function formatName(path) { return path || "/"; }
 function finiteNumber(value) { const number = Number(value || 0); return Number.isFinite(number) && number >= 0 ? number : 0; }
+
+const NODE_FILE = 0; const NODE_DIRECTORY = 1; const NODE_OTHER = 2; const NODE_UNKNOWN = 3;
+const NODE_PATH = 0; const NODE_PARENT = 1; const NODE_NAME = 2; const NODE_KIND = 3; const NODE_DISK = 4; const NODE_MTIME = 5; const NODE_FILES = 6;
+const CHANGE_PATH = 0; const CHANGE_NAME = 1; const CHANGE_KIND = 2; const CHANGE_BEFORE = 3; const CHANGE_AFTER = 4; const CHANGE_DELTA = 5; const CHANGE_BEFORE_FILES = 6; const CHANGE_AFTER_FILES = 7; const CHANGE_DELTA_FILES = 8; const CHANGE_PERCENT = 9; const CHANGE_STATUS = 10;
+
+function pathBucket(path) { let hash = 2166136261; for (let index = 0; index < path.length; index++) { hash ^= path.charCodeAt(index); hash = Math.imul(hash, 16777619); } return (hash >>> 0) % PATH_BUCKETS; }
+function kindCode(kind) { return kind === "directory" ? NODE_DIRECTORY : kind === "file" ? NODE_FILE : kind === "other" ? NODE_OTHER : NODE_UNKNOWN; }
+function kindName(kind) { return kind === NODE_DIRECTORY ? "directory" : kind === NODE_FILE ? "file" : kind === NODE_OTHER ? "other" : "unknown"; }
+
+async function putChunks(storeName, chunks) {
+  if (!chunks.length) return; const db = await dbReady; const tx = writeTransaction(db, storeName); const store = tx.objectStore(storeName); for (const chunk of chunks) store.put(chunk); await transactionDone(tx);
+}
+
+async function readChunks(storeName, snapshotId, type, bucket) {
+  const db = await dbReady; const tx = db.transaction(storeName, "readonly"); const chunks = await request(tx.objectStore(storeName).getAll(chunkRange(snapshotId, type, bucket))); await transactionDone(tx); return chunks;
+}
+
+async function readScratch(comparisonId, bucket) { const db = await dbReady; const tx = db.transaction("comparisonScratch", "readonly"); const chunks = await request(tx.objectStore("comparisonScratch").getAll(scratchRange(comparisonId, bucket))); await transactionDone(tx); return chunks; }
+
+class SnapshotChunkWriter {
+  constructor(snapshot) { this.snapshot = snapshot; this.storeName = snapshotStore(snapshot.slot); this.buffers = Array.from({ length: PATH_BUCKETS }, () => []); this.sequences = new Uint32Array(PATH_BUCKETS); this.buffered = 0; }
+  async write(rows, type = "nodes") {
+    const chunks = [];
+    for (const row of rows) { const path = type === "nodes" ? row[NODE_PATH] : row; const bucket = pathBucket(path); const buffer = this.buffers[bucket]; buffer.push(row); this.buffered++; if (buffer.length >= NODE_CHUNK_SIZE) this.take(bucket, type, chunks); }
+    while (this.buffered > CHUNK_BUFFER_LIMIT) { let largest = 0; for (let bucket = 1; bucket < PATH_BUCKETS; bucket++) if (this.buffers[bucket].length > this.buffers[largest].length) largest = bucket; this.take(largest, type, chunks); }
+    await putChunks(this.storeName, chunks);
+  }
+  take(bucket, type, chunks) { const rows = this.buffers[bucket]; if (!rows.length) return; this.buffers[bucket] = []; this.buffered -= rows.length; chunks.push({ snapshotId: this.snapshot.id, type, bucket, sequence: this.sequences[bucket]++, rows }); }
+  async finish(type = "nodes") { const chunks = []; for (let bucket = 0; bucket < PATH_BUCKETS; bucket++) this.take(bucket, type, chunks); await putChunks(this.storeName, chunks); }
+}
 
 function updateTop(top, row, direction) {
   const score = direction === "growth" ? row.delta : -row.delta;
   if (score <= 0) return;
-  top.push({ path: row.path, delta: row.delta, kind: row.kind, status: row.status });
-  top.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  if (top.length > TOP_LIMIT) top.length = TOP_LIMIT;
+  let index = 0; while (index < top.length && Math.abs(top[index].delta) >= Math.abs(row.delta)) index++; if (index >= TOP_LIMIT) return; top.splice(index, 0, { path: row.path, delta: row.delta, kind: row.kind, status: row.status }); if (top.length > TOP_LIMIT) top.pop();
 }
 
 async function putSnapshot(snapshot) {
@@ -418,27 +457,6 @@ async function putSnapshot(snapshot) {
   const tx = db.transaction("snapshots", "readwrite");
   tx.objectStore("snapshots").put(snapshot);
   await transactionDone(tx);
-}
-
-async function putBatch(snapshotId, records, parentPaths) {
-  if (!records.length) return;
-  const db = await dbReady;
-  const tx = db.transaction(["nodes", "parents"], "readwrite");
-  const nodes = tx.objectStore("nodes");
-  const parents = tx.objectStore("parents");
-  for (const record of records) nodes.put(record);
-  for (const path of parentPaths) parents.put({ snapshotId, path });
-  await transactionDone(tx);
-}
-
-async function readSnapshotBatch(snapshotId, afterPath = null) {
-  const db = await dbReady; const tx = db.transaction("nodes", "readonly"); const store = tx.objectStore("nodes"); const range = IDBKeyRange.lowerBound([snapshotId, afterPath || ""], afterPath !== null); const rows = [];
-  await new Promise((resolve, reject) => { const cursor = store.openCursor(range); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || item.value.snapshotId !== snapshotId || rows.length >= SCAN_BATCH) return resolve(); rows.push(item.value); item.continue(); }; }); await transactionDone(tx); return rows;
-}
-
-async function readSnapshotShardBatch(snapshotId, shard, afterPath = null) {
-  const db = await dbReady; const tx = db.transaction("nodes", "readonly"); const index = tx.objectStore("nodes").index("snapshotShard"); const range = IDBKeyRange.lowerBound([snapshotId, shard, afterPath || ""], afterPath !== null); const rows = [];
-  await new Promise((resolve, reject) => { const cursor = index.openCursor(range); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item || item.value.snapshotId !== snapshotId || item.value.shard !== shard || rows.length >= SCAN_BATCH) return resolve(); rows.push(item.value); item.continue(); }; }); await transactionDone(tx); return rows;
 }
 
 function formatFromName(name) {
@@ -476,7 +494,12 @@ function zip64Extra(bytes, offset, fields) {
   return null;
 }
 
-async function readZipEntry(file) {
+function streamProgress(stream, onBytes) {
+  let used = 0;
+  return stream.pipeThrough(new TransformStream({ transform(chunk, controller) { used += chunk.byteLength; onBytes(used); controller.enqueue(chunk); } }));
+}
+
+async function readZipEntry(file, onBytes) {
   const tailSize = Math.min(file.size, 65557);
   const tailOffset = file.size - tailSize;
   const tail = new Uint8Array(await file.slice(tailOffset).arrayBuffer());
@@ -525,20 +548,20 @@ async function readZipEntry(file) {
   const header = new DataView(await file.slice(entry.localOffset, entry.localOffset + 30).arrayBuffer());
   if (u32(header, 0) !== 0x04034b50) throw new Error("ZIP local file header was not found");
   const dataStart = entry.localOffset + 30 + u16(header, 26) + u16(header, 28);
-  const source = file.slice(dataStart, dataStart + entry.compressedSize).stream();
-  return { name: entry.name, stream: entry.method === 8 ? source.pipeThrough(new DecompressionStream("deflate-raw")) : source };
+  const source = streamProgress(file.slice(dataStart, dataStart + entry.compressedSize).stream(), onBytes);
+  return { name: entry.name, stream: entry.method === 8 ? source.pipeThrough(new DecompressionStream("deflate-raw")) : source, sourceSize: entry.compressedSize };
 }
 
-async function openStream(file, limit) {
+async function openStream(file, onBytes) {
   const archive = await detectArchive(file);
-  if (archive === "plain") return { name: file.name, stream: file.stream(), archive };
-  if (archive === "gzip") return { name: file.name.replace(/\.gz$/i, ""), stream: file.stream().pipeThrough(new DecompressionStream("gzip")), archive };
-  if (archive === "zip") { const entry = await readZipEntry(file); return { ...entry, archive }; }
+  if (archive === "plain") return { name: file.name, stream: streamProgress(file.stream(), onBytes), sourceSize: file.size, archive };
+  if (archive === "gzip") return { name: file.name.replace(/\.gz$/i, ""), stream: streamProgress(file.stream(), onBytes).pipeThrough(new DecompressionStream("gzip")), sourceSize: file.size, archive };
+  if (archive === "zip") { const entry = await readZipEntry(file, onBytes); return { ...entry, archive }; }
   try {
     const module = await import("https://esm.sh/xz-decompress@0.2.3");
     const XzReadableStream = module.XzReadableStream;
     if (!XzReadableStream) throw new Error("XZ decoder did not load");
-    return { name: file.name.replace(/\.xz$/i, ""), stream: new XzReadableStream(file.stream()), archive };
+    return { name: file.name.replace(/\.xz$/i, ""), stream: new XzReadableStream(streamProgress(file.stream(), onBytes)), sourceSize: file.size, archive };
   } catch (error) {
     throw new Error("Unable to load the XZ decoder. Check this page can reach esm.sh, then retry. " + error.message);
   }
@@ -660,17 +683,17 @@ function createJsonSax() {
   return parser;
 }
 
-async function parseGdu(stream, snapshot, progress) {
+async function parseGdu(stream, snapshot, progress, writer) {
   const parser = createJsonSax();
-  const stack = []; const batch = []; const parentBatch = new Set(); const extensionCounts = new Map(); const ageCounts = new Map();
-  let ageReference = Date.now(); let takenAt = 0; let files = 0; let directories = 0; let decoded = 0; let root = null; let failed = null;
-  const flush = async () => { if (batch.length) { await putBatch(snapshot.id, batch.splice(0), parentBatch); parentBatch.clear(); } };
+  const stack = []; const batch = []; const extensionCounts = new Map(); const ageCounts = new Map();
+  let ageReference = Date.now(); let takenAt = 0; let entries = 0; let files = 0; let directories = 0; let decoded = 0; let root = null; let failed = null;
+  const flush = async () => { if (batch.length) await writer.write(batch.splice(0)); };
   const nearestDirectory = (skip = 0) => { for (let index = stack.length - 1 - skip; index >= 0; index--) if (stack[index].type === "array" && stack[index].dir) return stack[index]; return null; };
   const addFile = (frame, props) => {
     if (!frame.dir || !props.name) return;
     const path = childPath(frame.dir.path, props.name); const disk = finiteNumber(props.dsize); const apparent = finiteNumber(props.asize); const ext = extension(path);
     const kind = props.notreg ? "other" : "file";
-    batch.push({ snapshotId: snapshot.id, path, shard: pathShard(path), parentPath: frame.dir.path, treeParent: frame.dir.path, name: normalizePath(props.name), kind, disk, apparent, mtime: finiteNumber(props.mtime), ext, flags: props.notreg ? "notreg" : props.hlnkc ? "hardlink" : "" });
+    batch.push([path, frame.dir.path, normalizePath(props.name), kindCode(kind), disk, finiteNumber(props.mtime), null]); entries++;
     frame.disk += disk; frame.apparent += apparent; if (kind === "file") { frame.files++; files++; extensionCounts.set(ext, (extensionCounts.get(ext) || 0) + disk); const age = ageBucket(props.mtime, ageReference); ageCounts.set(age, (ageCounts.get(age) || 0) + 1); }
   };
   parser.onopenarray = () => { const parent = stack[stack.length - 1]; const index = parent && parent.type === "array" ? parent.items++ : -1; stack.push({ type: "array", index, items: 0, dir: null, disk: 0, apparent: 0, files: 0, directories: 0 }); };
@@ -687,9 +710,9 @@ async function parseGdu(stream, snapshot, progress) {
   };
   parser.onclosearray = () => {
     const frame = stack.pop(); if (!frame.dir) return;
-    const directory = { snapshotId: snapshot.id, path: frame.dir.path, shard: pathShard(frame.dir.path), parentPath: frame.dir.path ? parentPath(frame.dir.path) : "", treeParent: frame.dir.path ? parentPath(frame.dir.path) : "", name: frame.dir.name || "/", kind: "directory", disk: frame.disk, apparent: frame.apparent, mtime: frame.dir.mtime, ext: "", flags: "", files: frame.files, directories: frame.directories };
-    batch.push(directory); directories++;
-    if (!frame.dir.path) root = directory;
+    const directory = [frame.dir.path, frame.dir.path ? parentPath(frame.dir.path) : "", frame.dir.name || "/", NODE_DIRECTORY, frame.disk, frame.dir.mtime, frame.files];
+    batch.push(directory); directories++; entries++;
+    if (!frame.dir.path) root = { disk: frame.disk, apparent: frame.apparent };
     const parent = nearestDirectory(); if (parent) { parent.disk += frame.disk; parent.apparent += frame.apparent; parent.files += frame.files; parent.directories += frame.directories + 1; }
   };
   parser.onerror = error => { failed = error; parser.resume(); };
@@ -700,9 +723,9 @@ async function parseGdu(stream, snapshot, progress) {
     for (let offset = 0; offset < text.length; offset += JSON_WRITE_CHUNK) { parser.write(text.slice(offset, offset + JSON_WRITE_CHUNK)); if (failed) throw failed; if (batch.length >= CHUNK_BATCH) await flush(); }
     progress({ phase: "indexing", decoded, records: files + directories });
   }
-  parser.write(decoder.decode()); parser.close(); if (failed) throw failed; await flush();
+  parser.write(decoder.decode()); parser.close(); if (failed) throw failed; await flush(); await writer.finish();
   if (!root) throw new Error("The JSON is not a complete GDU export. Use gdu -o snapshot.gdu.json /path without --summarize, --top, or --depth.");
-  return { totalDisk: root.disk, totalApparent: root.apparent, files, directories, qualifiedCounts: false, unknownLeaves: 0, extensions: topMap(extensionCounts), ages: topMap(ageCounts), decoded, takenAt };
+  return { totalDisk: root.disk, totalApparent: root.apparent, entries, files, directories, qualifiedCounts: false, unknownLeaves: 0, extensions: topMap(extensionCounts), ages: topMap(ageCounts), decoded, takenAt };
 }
 
 function ageBucket(timestamp, now = Date.now()) {
@@ -715,29 +738,26 @@ function ageBucket(timestamp, now = Date.now()) {
 }
 function topMap(map) { return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, value]) => ({ name, value })); }
 
-async function classifyDu(snapshotId, progress) {
-  const db = await dbReady; let directories = 0; let unknown = 0; let totalDisk = 0; let totalApparent = 0; let largest = 0; let records = 0; let afterPath = null;
-  while (true) {
-    const rows = await readSnapshotBatch(snapshotId, afterPath); if (!rows.length) break; const tx = db.transaction(["nodes", "parents"], "readwrite"); const nodes = tx.objectStore("nodes"); const parents = tx.objectStore("parents");
-    for (const node of rows) {
-      const markerRequest = parents.get([snapshotId, node.path]); const parentRequest = nodes.get([snapshotId, node.parentPath]); let markerReady = false; let parentReady = false; let marker = null; let parent = null;
-      const update = () => { if (!markerReady || !parentReady) return; if (marker) { node.kind = "directory"; directories++; } else { node.kind = "unknown"; unknown++; } if (!parent && node.path) node.treeParent = ""; nodes.put(node); records++; if (node.disk > largest) { largest = node.disk; totalDisk = node.disk; totalApparent = node.apparent; } };
-      markerRequest.onsuccess = () => { marker = markerRequest.result; markerReady = true; update(); }; parentRequest.onsuccess = () => { parent = parentRequest.result; parentReady = true; update(); };
-    }
-    await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "classifying", decoded: 0, records });
+async function classifyDu(snapshot, progress) {
+  const storeName = snapshotStore(snapshot.slot); const db = await dbReady; const missingParents = new Set(); let directories = 0; let unknown = 0; let totalDisk = 0; let largest = -1; let records = 0;
+  for (let bucket = 0; bucket < PATH_BUCKETS; bucket++) {
+    const [nodeChunks, parentChunks] = await Promise.all([readChunks(storeName, snapshot.id, "nodes", bucket), readChunks(storeName, snapshot.id, "parents", bucket)]); const nodePaths = new Set(nodeChunks.flatMap(chunk => chunk.rows.map(node => node[NODE_PATH]))); const directoryPaths = new Set(parentChunks.flatMap(chunk => chunk.rows)); for (const path of directoryPaths) if (!nodePaths.has(path)) missingParents.add(path);
+    for (const chunk of nodeChunks) for (const node of chunk.rows) { if (directoryPaths.has(node[NODE_PATH])) { node[NODE_KIND] = NODE_DIRECTORY; directories++; } else { node[NODE_KIND] = NODE_UNKNOWN; unknown++; } records++; if (node[NODE_DISK] > largest) { largest = node[NODE_DISK]; totalDisk = node[NODE_DISK]; } }
+    if (nodeChunks.length) await putChunks(storeName, nodeChunks); progress({ phase: "classifying", records, processed: bucket + 1, totalBuckets: PATH_BUCKETS });
   }
-  await deleteIndexRecords("parents", "snapshot", snapshotId); return { totalDisk, totalApparent, directories, files: null, qualifiedCounts: true, unknownLeaves: unknown, extensions: [], ages: [], decoded: 0 };
+  if (missingParents.size) for (let bucket = 0; bucket < PATH_BUCKETS; bucket++) { const chunks = await readChunks(storeName, snapshot.id, "nodes", bucket); const changed = []; for (const chunk of chunks) { let dirty = false; for (const node of chunk.rows) if (node[NODE_PARENT] && missingParents.has(node[NODE_PARENT])) { node[NODE_PARENT] = ""; dirty = true; } if (dirty) changed.push(chunk); } if (changed.length) await putChunks(storeName, changed); }
+  const cleanup = writeTransaction(db, storeName); cleanup.objectStore(storeName).delete(chunkRange(snapshot.id, "parents")); await transactionDone(cleanup); return { totalDisk, totalApparent: totalDisk, directories, files: null, qualifiedCounts: true, unknownLeaves: unknown, extensions: [], ages: [], decoded: 0 };
 }
 
-async function parseDu(stream, snapshot, progress) {
+async function parseDu(stream, snapshot, progress, writer, parentWriter) {
   let buffer = ""; let batch = []; const parentBatch = new Set(); let records = 0; let decoded = 0;
   const processRecord = line => {
     if (!line) return; const pieces = line.split("\t"); if (pieces.length < 2) return;
     const disk = finiteNumber(pieces[0]); const hasTime = pieces.length > 2 && /^\d+$/.test(pieces[1]); const rawPath = pieces.slice(hasTime ? 2 : 1).join("\t"); const path = normalizePath(rawPath); if (!path) return;
-    const parent = parentPath(path); batch.push({ snapshotId: snapshot.id, path, shard: pathShard(path), parentPath: parent, treeParent: parent, name: path.slice(path.lastIndexOf("/") + 1), kind: "unknown", disk, apparent: disk, mtime: hasTime ? finiteNumber(pieces[1]) : 0, ext: extension(path), flags: "" });
+    const parent = parentPath(path); batch.push([path, parent, path.slice(path.lastIndexOf("/") + 1), NODE_UNKNOWN, disk, hasTime ? finiteNumber(pieces[1]) : 0, null]);
     if (parent) parentBatch.add(parent); records++;
   };
-  const flush = async () => { if (batch.length) { await putBatch(snapshot.id, batch, parentBatch); batch = []; parentBatch.clear(); } };
+  const flush = async () => { if (batch.length) { await writer.write(batch); batch = []; if (parentBatch.size) await parentWriter.write([...parentBatch], "parents"); parentBatch.clear(); } };
   const reader = stream.getReader(); const decoder = new TextDecoder();
   while (true) {
     const { done, value } = await reader.read(); if (done) break;
@@ -746,72 +766,74 @@ async function parseDu(stream, snapshot, progress) {
     if (start) buffer = buffer.slice(start); if (buffer.length > DU_RECORD_LIMIT) throw new Error("GNU DU record exceeded the 4 MiB safety limit");
     progress({ phase: "indexing", decoded, records });
   }
-  buffer += decoder.decode(); processRecord(buffer); await flush(); if (!records) throw new Error("No GNU DU NUL-delimited records were found");
-  const summary = await classifyDu(snapshot.id, progress); summary.decoded = decoded; return summary;
+  buffer += decoder.decode(); processRecord(buffer); await flush(); await writer.finish(); await parentWriter.finish("parents"); if (!records) throw new Error("No GNU DU NUL-delimited records were found");
+  const summary = await classifyDu(snapshot, progress); summary.decoded = decoded; summary.entries = records; return summary;
 }
 
 async function importSnapshot({ snapshot, file, format, limit }) {
   const startedAt = Date.now();
   await putSnapshot({ ...snapshot, status: "indexing", createdAt: startedAt, fileName: file.name, fileSize: file.size, format, summary: null });
-  const report = await openStream(file, limit); const resolvedFormat = format === "auto" ? formatFromName(report.name) : format; const progress = progressReporter(snapshot.id);
-  const limited = streamLimit(report.stream, limit, decoded => progress({ phase: "decompressing", decoded, records: 0 }));
-  const parsed = resolvedFormat === "du" ? await parseDu(limited, snapshot, progress) : await parseGdu(limited, snapshot, progress); const { takenAt: reportTakenAt = 0, ...summary } = parsed; const fileModifiedAt = finiteNumber(file.lastModified); const takenAt = reportTakenAt || fileModifiedAt || null;
+  const progress = progressReporter(snapshot.id); progress({ phase: "opening", sourceBytes: 0, sourceTotal: file.size, decoded: 0, records: 0 }, true);
+  const report = await openStream(file, sourceBytes => progress({ sourceBytes })); const resolvedFormat = format === "auto" ? formatFromName(report.name) : format; progress({ phase: report.archive === "plain" ? "reading" : "decompressing", sourceTotal: report.sourceSize || file.size }, true);
+  const limited = streamLimit(report.stream, limit, decoded => progress({ decoded }));
+  const writer = new SnapshotChunkWriter(snapshot); const parsed = resolvedFormat === "du" ? await parseDu(limited, snapshot, progress, writer, new SnapshotChunkWriter(snapshot)) : await parseGdu(limited, snapshot, progress, writer); const { takenAt: reportTakenAt = 0, ...summary } = parsed; const fileModifiedAt = finiteNumber(file.lastModified); const takenAt = reportTakenAt || fileModifiedAt || null;
   const stored = { ...snapshot, status: "ready", createdAt: startedAt, completedAt: Date.now(), takenAt, takenAtSource: reportTakenAt ? "report" : fileModifiedAt ? "file" : null, fileName: file.name, reportName: report.name, fileSize: file.size, archive: report.archive, format: resolvedFormat, summary };
-  progress({ phase: "finishing", decoded: summary.decoded, records: (summary.files || 0) + summary.directories + (summary.unknownLeaves || 0) }, true); await putSnapshot(stored); postMessage({ type: "imported", snapshot: stored });
+  progress({ phase: "finishing", decoded: summary.decoded, records: summary.entries ?? (summary.files || 0) + summary.directories + (summary.unknownLeaves || 0) }, true); await putSnapshot(stored); postMessage({ type: "imported", snapshot: stored });
 }
 
-async function scanBaseline(comparisonId, baselineId, progress, shards = null) {
-  const db = await dbReady; let count = 0;
-  for (const shard of shards || [null]) { let afterPath = null;
-    while (true) { const rows = shard === null ? await readSnapshotBatch(baselineId, afterPath) : await readSnapshotShardBatch(baselineId, shard, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
-      for (const node of rows) { const beforeFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; changes.put({ comparisonId, path: node.path, shard: node.shard, treeParent: node.treeParent, name: node.name, kind: node.kind, before: node.disk, after: 0, delta: -node.disk, beforeFiles, afterFiles: beforeFiles === null ? null : 0, deltaFiles: beforeFiles === null ? null : -beforeFiles, percent: node.disk ? -100 : 0, status: "removed", beforeMtime: node.mtime }); count++; }
-      await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching baseline", records: count });
-    }
+function nodeFileCount(node) { return !node ? 0 : node[NODE_KIND] === NODE_FILE ? 1 : Number.isFinite(node[NODE_FILES]) ? node[NODE_FILES] : null; }
+
+function comparisonRow(baseline, comparison) {
+  const node = comparison || baseline; const before = baseline?.[NODE_DISK] || 0; const after = comparison?.[NODE_DISK] || 0; const delta = after - before;
+  const baselineCount = baseline ? nodeFileCount(baseline) : nodeFileCount(comparison); const comparisonCount = comparison ? nodeFileCount(comparison) : nodeFileCount(baseline); const beforeFiles = baseline ? baselineCount : baselineCount === null ? null : 0; const afterFiles = comparison ? comparisonCount : comparisonCount === null ? null : 0; const deltaFiles = beforeFiles === null || afterFiles === null ? null : afterFiles - beforeFiles;
+  let status = "unchanged"; if (!baseline) status = "added"; else if (!comparison) status = "removed"; else if (delta > 0) status = "grown"; else if (delta < 0) status = "shrunk"; else if (baseline[NODE_MTIME] !== comparison[NODE_MTIME] || deltaFiles) status = "changed";
+  return { path: node[NODE_PATH], treeParent: node[NODE_PARENT], name: node[NODE_NAME], kind: kindName(node[NODE_KIND]), before, after, delta, beforeFiles, afterFiles, deltaFiles, percent: before ? delta / before * 100 : after ? null : 0, status };
+}
+
+function changeTuple(row) { return [row.path, row.name, row.kind, row.before, row.after, row.delta, row.beforeFiles, row.afterFiles, row.deltaFiles, row.percent, row.status]; }
+
+async function putChangeChunks(chunks) {
+  for (let offset = 0; offset < chunks.length; offset += 1000) await putChunks("changeChunks", chunks.slice(offset, offset + 1000));
+}
+
+class ChangeChunkWriter {
+  constructor(comparisonId) { this.comparisonId = comparisonId; this.buffers = new Map(); this.sequences = new Map(); this.buffered = 0; this.written = 0; }
+  async write(rows) {
+    const chunks = [];
+    for (const row of rows) { let buffer = this.buffers.get(row.treeParent); if (!buffer) { buffer = []; this.buffers.set(row.treeParent, buffer); } buffer.push(changeTuple(row)); this.buffered++; if (buffer.length >= CHANGE_CHUNK_SIZE) this.take(row.treeParent, chunks); }
+    if (this.buffered > CHUNK_BUFFER_LIMIT) { const parents = [...this.buffers.keys()].sort((left, right) => this.buffers.get(right).length - this.buffers.get(left).length); for (const parent of parents) { if (this.buffered <= CHUNK_BUFFER_LIMIT / 2) break; this.take(parent, chunks); } }
+    await putChangeChunks(chunks);
   }
-  return count;
+  take(parent, chunks) { const rows = this.buffers.get(parent); if (!rows?.length) return; this.buffers.delete(parent); this.buffered -= rows.length; const sequence = this.sequences.get(parent) || 0; this.sequences.set(parent, sequence + 1); this.written += rows.length; chunks.push({ comparisonId: this.comparisonId, treeParent: parent, sequence, rows }); }
+  async finish() { const chunks = []; for (const parent of [...this.buffers.keys()]) this.take(parent, chunks); await putChangeChunks(chunks); }
 }
 
-async function scanComparison(comparisonId, comparisonIdSnapshot, progress, shards = null) {
-  const db = await dbReady; let count = 0; const growth = []; const shrink = []; const statuses = { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 };
-  for (const shard of shards || [null]) { let afterPath = null;
-    while (true) { const rows = shard === null ? await readSnapshotBatch(comparisonIdSnapshot, afterPath) : await readSnapshotShardBatch(comparisonIdSnapshot, shard, afterPath); if (!rows.length) break; const tx = db.transaction("changes", "readwrite"); const changes = tx.objectStore("changes");
-      for (const node of rows) { const get = changes.get([comparisonId, node.path]); get.onsuccess = () => { const previous = get.result; const before = previous ? previous.before : 0; const delta = node.disk - before; const afterFiles = node.kind === "file" ? 1 : Number.isFinite(node.files) ? node.files : null; const beforeFiles = previous ? previous.beforeFiles : afterFiles === null ? null : 0; const deltaFiles = beforeFiles === null || afterFiles === null ? null : afterFiles - beforeFiles; let status = "unchanged"; if (!previous) status = "added"; else if (delta > 0) status = "grown"; else if (delta < 0) status = "shrunk"; else if (previous.beforeMtime !== node.mtime || deltaFiles) status = "changed"; const row = { comparisonId, path: node.path, shard: node.shard, treeParent: node.treeParent, name: node.name, kind: node.kind, before, after: node.disk, delta, beforeFiles, afterFiles, deltaFiles, percent: before ? delta / before * 100 : node.disk ? null : 0, status }; changes.put(row); statuses[status] = (statuses[status] || 0) + 1; updateTop(growth, row, "growth"); updateTop(shrink, row, "shrink"); count++; }; }
-      await transactionDone(tx); afterPath = rows[rows.length - 1].path; progress({ phase: "matching comparison", records: count });
-    }
+function markDirectoryAncestors(path, directories) { let current = path; while (true) { if (directories.has(current)) return; directories.add(current); if (!current) return; current = parentPath(current); } }
+
+async function compareSnapshotRecords(comparisonId, baseline, comparison, progress, totalRecords) {
+  const baselineStore = snapshotStore(baseline.slot); const comparisonStore = snapshotStore(comparison.slot); const writer = new ChangeChunkWriter(comparisonId); const requiredDirectories = new Set([""]); let processed = 0; let count = 0; const growth = []; const shrink = []; const statuses = { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 };
+  for (let bucket = 0; bucket < PATH_BUCKETS; bucket++) {
+    const [baselineChunks, comparisonChunks] = await Promise.all([readChunks(baselineStore, baseline.id, "nodes", bucket), readChunks(comparisonStore, comparison.id, "nodes", bucket)]); const baselineRows = baselineChunks.flatMap(chunk => chunk.rows); const comparisonRows = comparisonChunks.flatMap(chunk => chunk.rows); const baselineByPath = new Map(baselineRows.map(row => [row[NODE_PATH], row])); const changed = []; const directories = [];
+    const processRow = row => { count++; statuses[row.status]++; updateTop(growth, row, "growth"); updateTop(shrink, row, "shrink"); if (row.kind === "directory") { directories.push(row); if (row.status !== "unchanged") markDirectoryAncestors(row.path, requiredDirectories); return; } if (row.status !== "unchanged") { markDirectoryAncestors(row.treeParent, requiredDirectories); changed.push(row); } };
+    for (const current of comparisonRows) { const before = baselineByPath.get(current[NODE_PATH]) || null; if (before) baselineByPath.delete(current[NODE_PATH]); processRow(comparisonRow(before, current)); }
+    for (const before of baselineByPath.values()) processRow(comparisonRow(before, null));
+    if (directories.length) await putChunks("comparisonScratch", [{ comparisonId, bucket, sequence: 0, rows: directories }]); processed += baselineRows.length + comparisonRows.length; await writer.write(changed); progress({ phase: "comparing snapshots", records: count, changed: writer.written + writer.buffered, processed, totalRecords });
   }
-  return { count, growth, shrink, statuses };
-}
-
-async function collectRemoved(comparisonId, growth, shrink, shards = null) {
-  const db = await dbReady; let removed = 0;
-  for (const shard of shards || [null]) { const tx = db.transaction("changes", "readonly"); const index = tx.objectStore("changes").index(shard === null ? "status" : "statusShard"); const key = shard === null ? [comparisonId, "removed"] : [comparisonId, "removed", shard]; await new Promise((resolve, reject) => { const req = index.openCursor(IDBKeyRange.only(key)); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); removed++; updateTop(shrink, cursor.value, "shrink"); cursor.continue(); }; }); await transactionDone(tx); }
-  return removed;
+  for (let bucket = 0; bucket < PATH_BUCKETS; bucket++) { const chunks = await readScratch(comparisonId, bucket); const directories = chunks.flatMap(chunk => chunk.rows).filter(row => requiredDirectories.has(row.path)); if (directories.length) await writer.write(directories); }
+  await writer.finish(); await deleteStoreRecords("comparisonScratch", comparisonId); return { count, written: writer.written, growth, shrink, statuses };
 }
 
 async function readySnapshots(baseline, comparison) {
   const db = await dbReady; const tx = db.transaction("snapshots", "readonly"); const snapshots = tx.objectStore("snapshots"); const base = await request(snapshots.get(baseline)); const current = await request(snapshots.get(comparison)); await transactionDone(tx); if (!base || !current || base.status !== "ready" || current.status !== "ready") throw new Error("Both snapshots must finish indexing before comparison"); return { db, base, current };
 }
 
-function mergeShardResults(results) {
-  const merged = { count: 0, growth: [], shrink: [], statuses: { added: 0, removed: 0, grown: 0, shrunk: 0, unchanged: 0, changed: 0 } };
-  for (const result of results) { merged.count += result.count; merged.growth.push(...result.growth); merged.shrink.push(...result.shrink); for (const key of Object.keys(merged.statuses)) merged.statuses[key] += result.statuses[key] || 0; }
-  merged.growth.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)); merged.growth.length = Math.min(TOP_LIMIT, merged.growth.length); merged.shrink.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)); merged.shrink.length = Math.min(TOP_LIMIT, merged.shrink.length); return merged;
-}
-
-async function writeComparisonResult(id, baseline, comparison, shardResults) {
-  const { db, base, current } = await readySnapshots(baseline, comparison); const result = shardResults.length === 1 ? shardResults[0] : mergeShardResults(shardResults);
+async function writeComparisonResult(id, db, base, current, result) {
   const summary = { before: base.summary.totalDisk, after: current.summary.totalDisk, delta: current.summary.totalDisk - base.summary.totalDisk, percent: base.summary.totalDisk ? (current.summary.totalDisk - base.summary.totalDisk) / base.summary.totalDisk * 100 : null, directories: { before: base.summary.directories, after: current.summary.directories, delta: current.summary.directories - base.summary.directories }, files: { before: base.summary.files, after: current.summary.files, delta: base.summary.files === null || current.summary.files === null ? null : current.summary.files - base.summary.files, unknown: (base.summary.unknownLeaves || 0) + (current.summary.unknownLeaves || 0) }, statuses: result.statuses };
-  const comparisonRecord = { id, baseline, comparison, createdAt: Date.now(), summary, growth: result.growth, shrink: result.shrink, properties: { baseline: base.summary.extensions || [], comparison: current.summary.extensions || [], baselineAges: base.summary.ages || [], comparisonAges: current.summary.ages || [] } }; const write = db.transaction("comparisons", "readwrite"); write.objectStore("comparisons").put(comparisonRecord); await transactionDone(write); postMessage({ type: "compared", comparison: comparisonRecord, snapshots: { baseline: base, comparison: current } });
+  const comparisonRecord = { id, baseline: base.id, comparison: current.id, createdAt: Date.now(), summary, growth: result.growth, shrink: result.shrink, properties: { baseline: base.summary.extensions || [], comparison: current.summary.extensions || [], baselineAges: base.summary.ages || [], comparisonAges: current.summary.ages || [] } }; const write = db.transaction("comparisons", "readwrite"); write.objectStore("comparisons").put(comparisonRecord); await transactionDone(write); postMessage({ type: "compared", comparison: comparisonRecord, snapshots: { baseline: base, comparison: current } });
 }
 
 async function compareSnapshots({ id, baseline, comparison }) {
-  await readySnapshots(baseline, comparison);
-  const progress = progressReporter(id); progress({ phase: "starting comparison", records: 0 }, true); await scanBaseline(id, baseline, progress); const result = await scanComparison(id, comparison, progress); result.statuses.removed = await collectRemoved(id, result.growth, result.shrink);
-  await writeComparisonResult(id, baseline, comparison, [result]);
-}
-
-async function compareShard({ id, baseline, comparison, shards }) {
-  await readySnapshots(baseline, comparison); const progress = progressReporter(id); progress({ phase: "comparing shard " + shards.join(","), records: 0 }, true); await scanBaseline(id, baseline, progress, shards); const result = await scanComparison(id, comparison, progress, shards); result.statuses.removed = await collectRemoved(id, result.growth, result.shrink, shards); postMessage({ type: "shard-compared", comparisonId: id, result });
+  const { db, base, current } = await readySnapshots(baseline, comparison); const totalRecords = (base.summary.entries ?? base.summary.directories + (base.summary.files ?? base.summary.unknownLeaves ?? 0)) + (current.summary.entries ?? current.summary.directories + (current.summary.files ?? current.summary.unknownLeaves ?? 0)); const progress = progressReporter(id); progress({ phase: "starting comparison", records: 0, changed: 0, processed: 0, totalRecords }, true); const result = await compareSnapshotRecords(id, base, current, progress, totalRecords); await writeComparisonResult(id, db, base, current, result);
 }
 
 let work = Promise.resolve();
@@ -820,38 +842,46 @@ self.onmessage = event => {
   work = work.then(async () => {
     if (message.type === "import") await importSnapshot(message);
     if (message.type === "compare") await compareSnapshots(message);
-    if (message.type === "compare-shard") await compareShard(message);
-    if (message.type === "finalize-comparison") await writeComparisonResult(message.id, message.baseline, message.comparison, message.shardResults || []);
     if (message.type === "cleanup-snapshot") await cleanupSnapshot(message.snapshotId);
     if (message.type === "cleanup-comparison") await cleanupComparison(message.comparisonId);
     if (message.type === "prune") await pruneData(message.snapshotIds || [], message.comparisonId);
-  }).catch(async error => { try { if (message.type === "import") await cleanupSnapshot(message.snapshot?.id); if (message.type === "compare" || message.type === "finalize-comparison") await cleanupComparison(message.id); } catch {} postMessage({ type: "error", snapshotId: message.snapshot?.id || message.id, message: error.message || String(error) }); });
+  }).catch(async error => { try { if (message.type === "import") await cleanupSnapshot(message.snapshot?.id); if (message.type === "compare") await cleanupComparison(message.id); } catch {} postMessage({ type: "error", snapshotId: message.snapshot?.id || message.id, message: error.message || String(error) }); });
 };
   </script>
 
   <script>
     const DB_NAME = "dudiff-local-v1";
-    const DB_VERSION = 2;
-    const state = { baseline: null, comparison: null, workers: {}, parallelImports: (navigator.hardwareConcurrency || 2) >= 4, processing: false, comparing: false, comparisonRun: null, comparisonId: null, currentPath: "", currentRow: null, selectedPath: null, selectedTreeIndex: -1, treeRows: [], treeSort: { key: "before", direction: -1 }, treeLoad: 0, treeTransaction: null, treeViewport: { start: -1, end: -1 }, searchResults: [], searchActiveIndex: -1, searchToken: 0, searchTransaction: null, comparisonRecord: null };
+    const DB_VERSION = 5;
+    const state = { baseline: null, comparison: null, workers: {}, parallelImports: (navigator.hardwareConcurrency || 2) >= 4, processing: false, comparing: false, comparisonId: null, currentPath: "", currentRow: null, directoryCache: new Map(), selectedPath: null, selectedTreeIndex: -1, treeRows: [], treeSort: { key: "before", direction: -1 }, treeLoad: 0, treeTransaction: null, treeViewport: { start: -1, end: -1 }, searchResults: [], searchActiveIndex: -1, searchToken: 0, searchTransaction: null, comparisonRecord: null };
     const $ = selector => document.querySelector(selector);
     const treeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const snapshotTimeFormatter = new Intl.DateTimeFormat("en-AU", { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" });
     const treeColumnMinimums = [180, 96, 96, 96, 96];
     const treeColumnLabels = ["Name", "Baseline size", "Size change", "Baseline files", "File change"];
+    const CHANGE_PATH = 0; const CHANGE_NAME = 1; const CHANGE_KIND = 2; const CHANGE_BEFORE = 3; const CHANGE_AFTER = 4; const CHANGE_DELTA = 5; const CHANGE_BEFORE_FILES = 6; const CHANGE_AFTER_FILES = 7; const CHANGE_DELTA_FILES = 8; const CHANGE_PERCENT = 9; const CHANGE_STATUS = 10;
     let treeScrollFrame = 0; let tooltipFrame = 0; let tooltipPoint = null; let tooltipSize = { width: 0, height: 0 };
     const els = { baselineFile: $("#baseline-file"), comparisonFile: $("#comparison-file"), baselineMeta: $("#baseline-meta"), comparisonMeta: $("#comparison-meta"), baselineProgress: $("#baseline-progress"), comparisonProgress: $("#comparison-progress"), importButton: $("#import-button"), clearButton: $("#clear-button"), sidebarToggle: $("#sidebar-toggle"), format: $("#format"), limit: $("#limit"), storage: $("#storage-status"), reportEmpty: $("#report-empty"), reportLoading: $("#report-loading"), reportLoadingDetail: $("#report-loading-detail"), workspace: $("#workspace"), comparisonStrip: $("#comparison-strip"), metrics: $("#metrics"), tree: $("#tree"), breadcrumbs: $("#breadcrumbs"), treeSearch: $("#tree-search"), treeSearchResults: $("#tree-search-results"), treeSelectedChange: $("#tree-selected-change"), treeSelectedBefore: $("#tree-selected-before"), treeSelectedFiles: $("#tree-selected-files"), treeSelectedFileChange: $("#tree-selected-file-change"), growth: $("#growth-list"), shrink: $("#shrink-list"), properties: $("#properties"), ages: $("#ages"), snapshotLine: $("#snapshot-line"), pathTooltip: $("#path-tooltip"), toast: $("#toast") };
 
     function request(request) { return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error || new Error("Database request failed")); }); }
     function transactionDone(transaction) { return new Promise((resolve, reject) => { transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error || new Error("Database transaction failed")); transaction.onabort = () => reject(transaction.error || new Error("Database transaction aborted")); }); }
+    function comparisonRange(id) { return IDBKeyRange.bound([id], [id, []]); }
+    function comparisonDirectoryRange(id, parent) { return IDBKeyRange.bound([id, parent], [id, parent, []]); }
+    function decodeChangeRow(row, treeParent) { return { path: row[CHANGE_PATH], treeParent, name: row[CHANGE_NAME], kind: row[CHANGE_KIND], before: row[CHANGE_BEFORE], after: row[CHANGE_AFTER], delta: row[CHANGE_DELTA], beforeFiles: row[CHANGE_BEFORE_FILES], afterFiles: row[CHANGE_AFTER_FILES], deltaFiles: row[CHANGE_DELTA_FILES], percent: row[CHANGE_PERCENT], status: row[CHANGE_STATUS] }; }
+    function decodeChangeChunks(chunks) { return chunks.flatMap(chunk => chunk.rows.map(row => decodeChangeRow(row, chunk.treeParent))); }
     let dbReady;
     try {
       const openRequest = indexedDB.open(DB_NAME, DB_VERSION);
-      openRequest.onupgradeneeded = () => {
-        const db = openRequest.result; const tx = openRequest.transaction; const store = (name, options) => db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, options); const addIndex = (objectStore, name, keyPath) => { if (!objectStore.indexNames.contains(name)) objectStore.createIndex(name, keyPath); };
-        const snapshots = store("snapshots", { keyPath: "id" }); addIndex(snapshots, "createdAt", "createdAt");
-        const nodes = store("nodes", { keyPath: ["snapshotId", "path"] }); addIndex(nodes, "snapshot", "snapshotId"); addIndex(nodes, "tree", ["snapshotId", "treeParent"]); addIndex(nodes, "snapshotShard", ["snapshotId", "shard", "path"]);
-        const parents = store("parents", { keyPath: ["snapshotId", "path"] }); addIndex(parents, "snapshot", "snapshotId"); store("comparisons", { keyPath: "id" });
-        const changes = store("changes", { keyPath: ["comparisonId", "path"] }); addIndex(changes, "comparison", "comparisonId"); addIndex(changes, "tree", ["comparisonId", "treeParent"]); addIndex(changes, "status", ["comparisonId", "status"]); addIndex(changes, "statusShard", ["comparisonId", "status", "shard"]);
+      openRequest.onupgradeneeded = event => {
+        const db = openRequest.result;
+        if (event.oldVersion < 5) {
+          for (const name of [...db.objectStoreNames]) db.deleteObjectStore(name);
+          db.createObjectStore("snapshots", { keyPath: "id" });
+          db.createObjectStore("comparisons", { keyPath: "id" });
+          db.createObjectStore("baselineData", { keyPath: ["snapshotId", "type", "bucket", "sequence"] });
+          db.createObjectStore("comparisonData", { keyPath: ["snapshotId", "type", "bucket", "sequence"] });
+          db.createObjectStore("changeChunks", { keyPath: ["comparisonId", "treeParent", "sequence"] });
+          db.createObjectStore("comparisonScratch", { keyPath: ["comparisonId", "bucket", "sequence"] });
+        }
       };
       dbReady = request(openRequest);
     } catch (error) {
@@ -904,7 +934,6 @@ self.onmessage = event => {
 
     function terminateWorker(slot) { const worker = state.workers[slot]; if (!worker) return; worker.terminate(); delete state.workers[slot]; }
     function terminateAllWorkers() { Object.keys(state.workers).forEach(terminateWorker); }
-    function terminateComparisonWorkers() { Object.keys(state.workers).filter(slot => slot.startsWith("compare-")).forEach(terminateWorker); }
     function createWorker(slot) {
       terminateWorker(slot); const source = $("#worker-source").textContent; const workerUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" })); const worker = new Worker(workerUrl); setTimeout(() => URL.revokeObjectURL(workerUrl), 0);
       worker.onmessage = event => handleWorkerMessage(event.data, slot); worker.onmessageerror = () => toast("Worker could not return a result to this page.", true); worker.onerror = event => { event.preventDefault(); if (state.workers[slot] === worker) delete state.workers[slot]; toast("Worker failed: " + (event.message || "unknown startup error"), true); }; state.workers[slot] = worker; return worker;
@@ -913,32 +942,26 @@ self.onmessage = event => {
     function coordinatorWorker() { return workerFor("coordinator"); }
     function importWorker(role, restart = false) { const slot = state.parallelImports ? role : "import"; return restart && state.parallelImports ? createWorker(slot) : workerFor(slot); }
     function handleWorkerMessage(message, slot) {
-      if (message.type === "progress") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; const file = role ? state[role] : null; const ratio = file?.size ? Math.min(.98, (message.decoded || 0) / file.size) : .35; const detail = message.phase.replace("indexing", "processing") + " · " + Number(message.records || 0).toLocaleString() + " records"; updateJob(message.snapshotId, role === "baseline" ? "Baseline" : "Comparison", detail, ratio); els.reportLoadingDetail.textContent = detail; }
-      if (message.type === "imported") { const role = snapshotRole(message.snapshot.id); if (!role) return; state[role + "ReadyId"] = message.snapshot.id; state[role + "Snapshot"] = message.snapshot; (role === "baseline" ? els.baselineMeta : els.comparisonMeta).textContent = snapshotMeta(message.snapshot); setUploadProgress(role, 100, "ready", "Processing complete"); if (state.parallelImports && slot === role) terminateWorker(slot); if (state.baselineReadyId && state.comparisonReadyId) startComparison(); else els.reportLoadingDetail.textContent = (role === "baseline" ? "Baseline" : "Comparison") + " ready · choose the other snapshot"; }
-      if (message.type === "shard-compared") { const run = state.comparisonRun; if (!run || message.comparisonId !== run.id) return; run.results.push(message.result); run.pending--; terminateWorker(slot); if (!run.pending) { els.reportLoadingDetail.textContent = "Merging comparison shards"; coordinatorWorker().postMessage({ type: "finalize-comparison", id: run.id, baseline: run.baseline, comparison: run.comparison, shardResults: run.results }); } }
-      if (message.type === "compared") { if (message.comparison.id !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; state.comparisonRun = null; els.importButton.disabled = false; state.comparisonRecord = message.comparison; state.snapshots = message.snapshots; coordinatorWorker().postMessage({ type: "prune", snapshotIds: [message.comparison.baseline, message.comparison.comparison], comparisonId: message.comparison.id }); renderWorkspace(); }
-      if (message.type === "error") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; state.comparisonRun = null; if (role) { setUploadProgress(role, 100, "error", "Import failed"); if (state.parallelImports && slot === role) terminateWorker(slot); } else { terminateComparisonWorkers(); coordinatorWorker().postMessage({ type: "cleanup-comparison", comparisonId: message.snapshotId }); } stopProcessing(); toast(message.message, true); els.importButton.disabled = !(state.baseline && state.comparison); }
+      if (message.type === "progress") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; const phase = (message.phase || "processing").replace("indexing", "processing"); const parts = [phase]; if (message.sourceTotal) parts.push(bytes(message.sourceBytes || 0) + " / " + bytes(message.sourceTotal) + " source"); if (message.decoded) parts.push(bytes(message.decoded) + " expanded"); if (message.totalRecords) { parts.push(Number(message.processed || 0).toLocaleString() + " / " + Number(message.totalRecords).toLocaleString() + " scanned"); parts.push(Number(message.changed || 0).toLocaleString() + " changes"); } else parts.push(Number(message.records || 0).toLocaleString() + " records"); const detail = parts.join(" · "); const ratio = message.sourceTotal ? Math.min(.94, (message.sourceBytes || 0) / message.sourceTotal) : message.totalRecords ? Math.min(.94, (message.processed || 0) / message.totalRecords) : .35; updateJob(message.snapshotId, role === "baseline" ? "Baseline" : "Comparison", detail, ratio); els.reportLoadingDetail.textContent = detail; }
+      if (message.type === "imported") { const role = snapshotRole(message.snapshot.id); if (!role) return; state[role + "ReadyId"] = message.snapshot.id; state[role + "Snapshot"] = message.snapshot; (role === "baseline" ? els.baselineMeta : els.comparisonMeta).textContent = snapshotMeta(message.snapshot); setUploadProgress(role, 100, "ready", "Processing complete"); if (state.parallelImports && slot === role) terminateWorker(slot); if (state.baselineReadyId && state.comparisonReadyId) startComparison(); else { const otherRole = role === "baseline" ? "comparison" : "baseline"; els.reportLoadingDetail.textContent = (role === "baseline" ? "Baseline" : "Comparison") + " ready · choose the other snapshot"; if (!state[otherRole]) { state.processing = false; stopProcessing(); } } }
+      if (message.type === "compared") { if (message.comparison.id !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; els.importButton.disabled = false; state.comparisonRecord = message.comparison; state.snapshots = message.snapshots; coordinatorWorker().postMessage({ type: "prune", snapshotIds: [message.comparison.baseline, message.comparison.comparison], comparisonId: message.comparison.id }); renderWorkspace(); }
+      if (message.type === "error") { const role = snapshotRole(message.snapshotId); if (!role && message.snapshotId !== state.comparisonIdRecord) return; state.processing = false; state.comparing = false; if (role) { setUploadProgress(role, 100, "error", "Import failed"); if (state.parallelImports && slot === role) terminateWorker(slot); } else coordinatorWorker().postMessage({ type: "cleanup-comparison", comparisonId: message.snapshotId }); stopProcessing(); toast(message.message, true); els.importButton.disabled = !(state.baseline && state.comparison); }
     }
 
-    function cancelComparison() { const comparisonId = state.comparisonIdRecord; terminateComparisonWorkers(); terminateWorker("coordinator"); state.comparing = false; state.comparisonRun = null; state.comparisonIdRecord = null; if (comparisonId) coordinatorWorker().postMessage({ type: "cleanup-comparison", comparisonId }); }
-    function snapshotEntryCount(snapshot) { if (!snapshot?.summary) return 0; return snapshot.summary.directories + (snapshot.summary.files === null ? snapshot.summary.unknownLeaves || 0 : snapshot.summary.files); }
-    function comparisonWorkerCount() { const entries = Math.max(snapshotEntryCount(state.baselineSnapshot), snapshotEntryCount(state.comparisonSnapshot)); const cores = navigator.hardwareConcurrency || 2; if (entries < 50000 || cores < 4) return 1; return cores >= 8 ? 4 : 2; }
+    function cancelComparison() { const comparisonId = state.comparisonIdRecord; terminateWorker("coordinator"); state.comparing = false; state.comparisonIdRecord = null; if (comparisonId) coordinatorWorker().postMessage({ type: "cleanup-comparison", comparisonId }); }
     async function processSnapshot(role) {
       const file = state[role]; if (!file || !await checkStorage()) return; if (state.comparing) cancelComparison();
       const previousSnapshotId = state[role + "ReadyId"] || state[role + "Id"]; const snapshotId = id(); const worker = importWorker(role, true); if (previousSnapshotId && previousSnapshotId !== snapshotId) (state.parallelImports ? coordinatorWorker() : worker).postMessage({ type: "cleanup-snapshot", snapshotId: previousSnapshotId });
       state.processing = true; state.comparisonRecord = null; state.comparisonIdRecord = null; state.comparing = false; state[role + "Id"] = snapshotId; state[role + "ReadyId"] = null; state[role + "Snapshot"] = null; els.importButton.disabled = true; showProcessing("Processing " + role + " snapshot"); setUploadProgress(role, 1, "active", "Processing");
-      worker.postMessage({ type: "import", snapshot: { id: snapshotId, label: role === "baseline" ? "Baseline" : "Comparison" }, file, format: els.format.value, limit: Number(els.limit.value) });
+      worker.postMessage({ type: "import", snapshot: { id: snapshotId, slot: role, label: role === "baseline" ? "Baseline" : "Comparison" }, file, format: els.format.value, limit: Number(els.limit.value) });
     }
     async function startImport() {
-      if (!state.baseline || !state.comparison || !await checkStorage()) return; const previousSnapshotIds = new Set([state.baselineReadyId || state.baselineId, state.comparisonReadyId || state.comparisonId].filter(Boolean)); const partialComparisonId = state.comparisonIdRecord; terminateAllWorkers(); state.processing = true; state.comparing = false; state.comparisonRun = null; state.comparisonRecord = null; els.importButton.disabled = true; showProcessing(state.parallelImports ? "Processing snapshots in parallel" : "Processing snapshots"); state.baselineId = id(); state.comparisonId = id(); state.baselineReadyId = null; state.comparisonReadyId = null; state.baselineSnapshot = null; state.comparisonSnapshot = null; state.comparisonIdRecord = null; setUploadProgress("baseline", 1, "active", "Waiting to process"); setUploadProgress("comparison", 1, "active", "Waiting to process"); const format = els.format.value; const limit = Number(els.limit.value);
-      if (state.parallelImports) { const coordinator = coordinatorWorker(); if (partialComparisonId) coordinator.postMessage({ type: "cleanup-comparison", comparisonId: partialComparisonId }); for (const snapshotId of previousSnapshotIds) coordinator.postMessage({ type: "cleanup-snapshot", snapshotId }); const baselineWorker = importWorker("baseline", true); const comparisonWorker = importWorker("comparison", true); baselineWorker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit }); comparisonWorker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit }); }
-      else { const worker = importWorker("baseline"); if (partialComparisonId) worker.postMessage({ type: "cleanup-comparison", comparisonId: partialComparisonId }); for (const snapshotId of previousSnapshotIds) worker.postMessage({ type: "cleanup-snapshot", snapshotId }); worker.postMessage({ type: "import", snapshot: { id: state.baselineId, label: "Baseline" }, file: state.baseline, format, limit }); worker.postMessage({ type: "import", snapshot: { id: state.comparisonId, label: "Comparison" }, file: state.comparison, format, limit }); }
+      if (!state.baseline || !state.comparison || !await checkStorage()) return; const previousSnapshotIds = new Set([state.baselineReadyId || state.baselineId, state.comparisonReadyId || state.comparisonId].filter(Boolean)); const partialComparisonId = state.comparisonIdRecord; terminateAllWorkers(); state.processing = true; state.comparing = false; state.comparisonRecord = null; els.importButton.disabled = true; showProcessing(state.parallelImports ? "Processing snapshots in parallel" : "Processing snapshots"); state.baselineId = id(); state.comparisonId = id(); state.baselineReadyId = null; state.comparisonReadyId = null; state.baselineSnapshot = null; state.comparisonSnapshot = null; state.comparisonIdRecord = null; setUploadProgress("baseline", 1, "active", "Waiting to process"); setUploadProgress("comparison", 1, "active", "Waiting to process"); const format = els.format.value; const limit = Number(els.limit.value);
+      if (state.parallelImports) { const coordinator = coordinatorWorker(); if (partialComparisonId) coordinator.postMessage({ type: "cleanup-comparison", comparisonId: partialComparisonId }); for (const snapshotId of previousSnapshotIds) coordinator.postMessage({ type: "cleanup-snapshot", snapshotId }); const baselineWorker = importWorker("baseline", true); const comparisonWorker = importWorker("comparison", true); baselineWorker.postMessage({ type: "import", snapshot: { id: state.baselineId, slot: "baseline", label: "Baseline" }, file: state.baseline, format, limit }); comparisonWorker.postMessage({ type: "import", snapshot: { id: state.comparisonId, slot: "comparison", label: "Comparison" }, file: state.comparison, format, limit }); }
+      else { const worker = importWorker("baseline"); if (partialComparisonId) worker.postMessage({ type: "cleanup-comparison", comparisonId: partialComparisonId }); for (const snapshotId of previousSnapshotIds) worker.postMessage({ type: "cleanup-snapshot", snapshotId }); worker.postMessage({ type: "import", snapshot: { id: state.baselineId, slot: "baseline", label: "Baseline" }, file: state.baseline, format, limit }); worker.postMessage({ type: "import", snapshot: { id: state.comparisonId, slot: "comparison", label: "Comparison" }, file: state.comparison, format, limit }); }
     }
     function startComparison() {
-      if (state.comparing || !state.baselineReadyId || !state.comparisonReadyId) return; if (!state.parallelImports) terminateWorker("import"); const previousComparisonId = state.comparisonRecord?.id; const comparisonId = id(); const workerCount = comparisonWorkerCount(); const coordinator = coordinatorWorker(); state.comparing = true; state.comparisonIdRecord = comparisonId; els.reportLoadingDetail.textContent = workerCount === 1 ? "Comparing filesystem properties" : "Comparing filesystem properties across " + workerCount + " workers"; if (previousComparisonId && previousComparisonId !== comparisonId) coordinator.postMessage({ type: "cleanup-comparison", comparisonId: previousComparisonId });
-      if (workerCount === 1) { coordinator.postMessage({ type: "compare", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId }); return; }
-      const groups = Array.from({ length: workerCount }, () => []); for (let shard = 0; shard < 4; shard++) groups[shard % workerCount].push(shard); state.comparisonRun = { id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId, pending: workerCount, results: [] };
-      groups.forEach((shards, index) => createWorker("compare-" + index).postMessage({ type: "compare-shard", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId, shards }));
+      if (state.comparing || !state.baselineReadyId || !state.comparisonReadyId) return; if (!state.parallelImports) terminateWorker("import"); const previousComparisonId = state.comparisonRecord?.id; const comparisonId = id(); const coordinator = coordinatorWorker(); state.comparing = true; state.comparisonIdRecord = comparisonId; els.reportLoadingDetail.textContent = "Comparing filesystem properties"; if (previousComparisonId && previousComparisonId !== comparisonId) coordinator.postMessage({ type: "cleanup-comparison", comparisonId: previousComparisonId }); coordinator.postMessage({ type: "compare", id: comparisonId, baseline: state.baselineReadyId, comparison: state.comparisonReadyId });
     }
 
     function metric(label, value, note, tone = "") { return '<article class="metric"><div class="metric-label">' + escapeHtml(label) + '</div><div class="metric-value ' + tone + '">' + escapeHtml(value) + '</div><div class="metric-note">' + escapeHtml(note) + '</div></article>'; }
@@ -950,7 +973,7 @@ self.onmessage = event => {
       els.comparisonStrip.innerHTML = comparisonFileCard(baseline, "Baseline") + '<div class="comparison-arrow" aria-hidden="true"><svg class="action-icon" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></div>' + comparisonFileCard(current, "Comparison");
       els.metrics.innerHTML = metric("Baseline storage", bytes(summary.before), baseline.fileName) + metric("Comparison storage", bytes(summary.after), current.fileName) + metric("Storage change", signedBytes(summary.delta), summary.delta > 0 ? "more disk usage" : summary.delta < 0 ? "less disk usage" : "no change", tone) + metric("Percentage change", percent(summary.percent), summary.percent === null ? "baseline was empty" : "relative to baseline", tone) + metric("Directories / files", signedCount(summary.directories.delta) + " / " + (summary.files.delta === null ? "qualified" : signedCount(summary.files.delta)), countText(baseline, "directories") + " dirs · " + countText(baseline, "files") + " files");
       els.snapshotLine.textContent = baseline.format.toUpperCase() + " / " + current.format.toUpperCase() + " · processed locally";
-      state.currentPath = decodePathHash(); state.selectedPath = null; els.treeSearch.value = ""; closeTreeSearch(); renderTop(els.growth, comparison.growth, "No paths increased storage."); renderTop(els.shrink, comparison.shrink, "No paths reduced storage."); renderProperties(comparison.properties); stopProcessing(); els.reportEmpty.classList.add("hidden"); setSidebarCollapsed(true); els.workspace.classList.remove("hidden", "entering"); requestAnimationFrame(() => els.workspace.classList.add("entering")); loadTree(); els.workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+      state.currentPath = decodePathHash(); state.currentRow = null; state.directoryCache.clear(); state.selectedPath = null; els.treeSearch.value = ""; closeTreeSearch(); renderTop(els.growth, comparison.growth, "No paths increased storage."); renderTop(els.shrink, comparison.shrink, "No paths reduced storage."); renderProperties(comparison.properties); stopProcessing(); els.reportEmpty.classList.add("hidden"); setSidebarCollapsed(true); els.workspace.classList.remove("hidden", "entering"); requestAnimationFrame(() => els.workspace.classList.add("entering")); loadTree(); els.workspace.scrollIntoView({ behavior: "smooth", block: "start" });
     }
     function signedCount(value) { return (value > 0 ? "+" : "") + Number(value || 0).toLocaleString(); }
     function renderTop(element, rows, empty) { if (!rows?.length) { element.innerHTML = '<li class="empty">' + empty + '</li>'; return; } element.innerHTML = rows.slice(0, 8).map(row => '<li class="list-item"><span class="list-path" title="' + escapeHtml(row.path || "/") + '">' + escapeHtml(row.path || "/") + '</span><span class="list-value ' + (row.delta > 0 ? "gain" : "reclaim") + '">' + escapeHtml(signedBytes(row.delta)) + '</span></li>').join(""); }
@@ -962,8 +985,8 @@ self.onmessage = event => {
     }
 
     async function directoryChanges(parent) {
-      try { state.treeTransaction?.abort(); } catch {} const db = await dbReady; const tx = db.transaction("changes", "readonly"); state.treeTransaction = tx; const store = tx.objectStore("changes"); const index = store.index("tree");
-      try { const [rows, current] = await Promise.all([request(index.getAll(IDBKeyRange.only([state.comparisonRecord.id, parent]))), request(store.get([state.comparisonRecord.id, parent]))]); await transactionDone(tx); return { rows: rows.filter(row => row.path !== parent), current: current || null }; }
+      try { state.treeTransaction?.abort(); } catch {} const db = await dbReady; const tx = db.transaction("changeChunks", "readonly"); state.treeTransaction = tx; const store = tx.objectStore("changeChunks");
+      try { const cached = state.directoryCache.get(parent) || null; const [childChunks, parentChunks] = await Promise.all([request(store.getAll(comparisonDirectoryRange(state.comparisonRecord.id, parent))), parent && !cached ? request(store.getAll(comparisonDirectoryRange(state.comparisonRecord.id, parentOf(parent)))) : Promise.resolve([])]); await transactionDone(tx); const rows = decodeChangeChunks(childChunks); for (const row of rows) if (row.kind === "directory") state.directoryCache.set(row.path, row); const current = cached || (parent ? decodeChangeChunks(parentChunks).find(row => row.path === parent) : rows.find(row => !row.path)); if (current?.kind === "directory") state.directoryCache.set(current.path, current); return { rows: rows.filter(row => row.path !== parent), current: current || null }; }
       finally { if (state.treeTransaction === tx) state.treeTransaction = null; }
     }
     function compareTreeRows(left, right) {
@@ -1031,7 +1054,7 @@ self.onmessage = event => {
     function renderTree() {
       const rows = state.treeRows; const head = '<div class="tree-head"><div class="tree-head-cell tree-name-head"><button class="tree-parent-btn" data-parent type="button" aria-label="Go to parent directory"' + (!state.currentPath ? " disabled" : "") + '>↑</button>' + sortButton("Name", "name", "path-sort") + treeColumnResizeHandle(0) + '</div><div class="tree-head-cell">' + sortButton("Baseline size", "before") + treeColumnResizeHandle(1) + '</div><div class="tree-head-cell">' + sortButton("Size change", "delta") + treeColumnResizeHandle(2) + '</div><div class="tree-head-cell">' + sortButton("Baseline files", "beforeFiles") + treeColumnResizeHandle(3) + '</div><div class="tree-head-cell">' + sortButton("File change", "deltaFiles") + '</div></div>';
       state.treeViewport = { start: -1, end: -1 }; els.tree.scrollTop = 0;
-      if (!rows.length) { els.tree.innerHTML = head + '<div class="empty">No entries in this directory.</div>'; return; }
+      if (!rows.length) { els.tree.innerHTML = head + '<div class="empty">No changed entries in this directory.</div>'; return; }
       els.tree.innerHTML = head + '<div class="tree-body" style="height:' + (rows.length * 36) + 'px"></div>'; renderVisibleTreeRows(true);
     }
     function renderVisibleTreeRows(force = false) {
@@ -1047,8 +1070,8 @@ self.onmessage = event => {
     function insertSearchCandidate(results, candidate) { let index = results.length; while (index > 0 && (candidate.score < results[index - 1].score || candidate.score === results[index - 1].score && candidate.row.before > results[index - 1].row.before)) index--; if (index >= 50) return; results.splice(index, 0, candidate); if (results.length > 50) results.pop(); }
     async function searchTree(query) {
       const normalized = query.trim().toLowerCase(); const token = ++state.searchToken; if (!normalized) return closeTreeSearch(); try { state.searchTransaction?.abort(); } catch {}
-      const terms = normalized.split(/\s+/).filter(Boolean); const results = []; const db = await dbReady; const tx = db.transaction("changes", "readonly"); state.searchTransaction = tx; const index = tx.objectStore("changes").index("comparison");
-      try { await new Promise((resolve, reject) => { const cursor = index.openCursor(IDBKeyRange.only(state.comparisonRecord.id)); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item) return resolve(); const row = item.value; const text = (row.name + " " + row.path).toLowerCase(); if (terms.every(term => text.includes(term))) { const name = row.name.toLowerCase(); const score = name === normalized ? 0 : name.startsWith(normalized) ? 1 : name.includes(normalized) ? 2 : 3; insertSearchCandidate(results, { row, score }); } item.continue(); }; }); await transactionDone(tx); }
+      const terms = normalized.split(/\s+/).filter(Boolean); const results = []; const db = await dbReady; const tx = db.transaction("changeChunks", "readonly"); state.searchTransaction = tx; const store = tx.objectStore("changeChunks");
+      try { await new Promise((resolve, reject) => { const cursor = store.openCursor(comparisonRange(state.comparisonRecord.id)); cursor.onerror = () => reject(cursor.error); cursor.onsuccess = () => { const item = cursor.result; if (!item) return resolve(); const chunk = item.value; for (const value of chunk.rows) { const row = decodeChangeRow(value, chunk.treeParent); const text = (row.name + " " + row.path).toLowerCase(); if (terms.every(term => text.includes(term))) { const name = row.name.toLowerCase(); const score = name === normalized ? 0 : name.startsWith(normalized) ? 1 : name.includes(normalized) ? 2 : 3; insertSearchCandidate(results, { row, score }); } } item.continue(); }; }); await transactionDone(tx); }
       catch (error) { if (error?.name === "AbortError") return; throw error; }
       finally { if (state.searchTransaction === tx) state.searchTransaction = null; }
       if (token !== state.searchToken) return;
@@ -1057,7 +1080,7 @@ self.onmessage = event => {
     function renderTreeSearchResults() { els.treeSearchResults.hidden = false; els.treeSearch.setAttribute("aria-expanded", "true"); els.treeSearchResults.innerHTML = state.searchResults.length ? state.searchResults.map((row, index) => '<button class="search-result" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-index="' + index + '"><span><span class="search-result-name">' + escapeHtml(row.name || "/") + '</span><span class="search-result-path">' + escapeHtml(row.path || "/") + '</span></span><span class="search-result-meta">' + (row.kind === "directory" ? "DIR" : "FILE") + ' · ' + escapeHtml(bytes(row.before)) + ' · ' + escapeHtml(fileCount(row.beforeFiles)) + ' files</span></button>').join("") : '<div class="empty">No matches</div>'; }
     function closeTreeSearch() { state.searchToken++; clearTimeout(searchTree.timer); try { state.searchTransaction?.abort(); } catch {} state.searchTransaction = null; state.searchResults = []; state.searchActiveIndex = -1; els.treeSearchResults.hidden = true; els.treeSearch.setAttribute("aria-expanded", "false"); }
     function updateSearchSelection(step) { if (!state.searchResults.length) return; const previous = state.searchActiveIndex; state.searchActiveIndex = (state.searchActiveIndex + step + state.searchResults.length) % state.searchResults.length; els.treeSearchResults.querySelector('[data-search-index="' + previous + '"]')?.setAttribute("aria-selected", "false"); const active = els.treeSearchResults.querySelector('[data-search-index="' + state.searchActiveIndex + '"]'); active?.setAttribute("aria-selected", "true"); active?.scrollIntoView({ block: "nearest" }); }
-    function activateSearchResult(index = state.searchActiveIndex) { const row = state.searchResults[index]; if (!row) return; els.treeSearch.value = ""; row.kind === "directory" ? navigateTree(row.path) : navigateTree(row.treeParent, true, row.path); els.tree.focus(); }
+    function activateSearchResult(index = state.searchActiveIndex) { const row = state.searchResults[index]; if (!row) return; els.treeSearch.value = ""; if (row.kind === "directory") { state.directoryCache.set(row.path, row); navigateTree(row.path); } else navigateTree(row.treeParent, true, row.path); els.tree.focus(); }
     els.tree.addEventListener("pointerdown", event => { const handle = event.target.closest("[data-resize-column]"); if (handle) beginTreeColumnResize(event, handle); });
     els.tree.addEventListener("click", event => { const parent = event.target.closest("[data-parent]"); if (parent) { navigateTree(parentOf(state.currentPath)); return; } const sort = event.target.closest("[data-sort]"); if (sort) { setTreeSort(sort.dataset.sort); return; } const row = event.target.closest(".tree-row[data-path]"); if (row) selectTreeRow(row.dataset.path); });
     els.tree.addEventListener("dblclick", event => { const row = event.target.closest(".tree-row[data-path]"); if (!row) return; selectTreeRow(row.dataset.path); enterSelected(); });
@@ -1077,8 +1100,8 @@ self.onmessage = event => {
 
     async function exportCsv() {
       if (!state.comparisonRecord) return; const button = $("#download-csv"); button.disabled = true;
-      try { const db = await dbReady; const tx = db.transaction("changes", "readonly"); const index = tx.objectStore("changes").index("comparison"); const parts = ["path,status,kind,baseline_bytes,comparison_bytes,delta_bytes,baseline_files,comparison_files,delta_files,percent_change\n"]; let chunk = [];
-        await new Promise((resolve, reject) => { const req = index.openCursor(IDBKeyRange.only(state.comparisonRecord.id)); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); const row = cursor.value; chunk.push([row.path, row.status, row.kind, row.before, row.after, row.delta, row.beforeFiles ?? "", row.afterFiles ?? "", row.deltaFiles ?? "", row.percent === null ? "" : row.percent].map(value => '"' + String(value).replaceAll('"', '""') + '"').join(",")); if (chunk.length >= 1000) { parts.push(chunk.join("\n") + "\n"); chunk = []; } cursor.continue(); }; }); await transactionDone(tx); if (chunk.length) parts.push(chunk.join("\n") + "\n"); const blob = new Blob(parts, { type: "text/csv" }); const link = document.createElement("a"); const url = URL.createObjectURL(blob); link.href = url; link.download = "du-diff-" + new Date().toISOString().slice(0, 10) + ".csv"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 0);
+      try { const db = await dbReady; const tx = db.transaction("changeChunks", "readonly"); const store = tx.objectStore("changeChunks"); const parts = ["path,status,kind,baseline_bytes,comparison_bytes,delta_bytes,baseline_files,comparison_files,delta_files,percent_change\n"]; let rows = [];
+        await new Promise((resolve, reject) => { const req = store.openCursor(comparisonRange(state.comparisonRecord.id)); req.onerror = () => reject(req.error); req.onsuccess = () => { const cursor = req.result; if (!cursor) return resolve(); const stored = cursor.value; for (const value of stored.rows) { const row = decodeChangeRow(value, stored.treeParent); rows.push([row.path, row.status, row.kind, row.before, row.after, row.delta, row.beforeFiles ?? "", row.afterFiles ?? "", row.deltaFiles ?? "", row.percent === null ? "" : row.percent].map(cell => '"' + String(cell).replaceAll('"', '""') + '"').join(",")); if (rows.length >= 1000) { parts.push(rows.join("\n") + "\n"); rows = []; } } cursor.continue(); }; }); await transactionDone(tx); if (rows.length) parts.push(rows.join("\n") + "\n"); const blob = new Blob(parts, { type: "text/csv" }); const link = document.createElement("a"); const url = URL.createObjectURL(blob); link.href = url; link.download = "du-diff-" + new Date().toISOString().slice(0, 10) + ".csv"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 0);
       } finally { button.disabled = false; }
     }
     $("#download-csv").addEventListener("click", () => exportCsv().catch(error => toast(error.message, true)));

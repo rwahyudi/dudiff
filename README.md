@@ -36,10 +36,10 @@ Open the link, upload a baseline and a later report, then choose **Process snaps
 - largest increases and decreases;
 - directory-level file counts and size deltas;
 - extension and file-age summaries when the source provides them;
-- a searchable, sortable file browser with resizable columns;
+- a searchable, sortable changes-only file browser with resizable columns;
 - the capture time embedded in GDU reports, or the source file modification time as a fallback.
 
-The application is a single `index.html` artifact. Parsing happens in a Web Worker, reads are streamed, and indexed records are stored locally in IndexedDB.
+The application is a single `index.html` artifact. Parsing happens in a Web Worker, reads are streamed, and compact path buckets are stored locally in IndexedDB. Comparisons retain changed files and the ancestor directories needed to reach them instead of materializing another complete filesystem copy.
 
 ## Quick start
 
@@ -92,9 +92,10 @@ LC_ALL=C du --all --block-size=1 --null --time --time-style=+%s /path/to/data > 
 
 1. The browser reads each selected report incrementally.
 2. A Web Worker parses and normalizes entries without blocking the interface.
-3. Snapshot nodes and comparison changes are written to IndexedDB in batches.
-4. The comparison view reads only the directory currently being browsed and virtualizes visible rows for large directories.
-5. Search, sorting, navigation, CSV export, and column resizing happen locally.
+3. Snapshot entries are hash-partitioned into compact IndexedDB chunks, avoiding one database request per file.
+4. Matching path buckets are compared in bounded memory; only changed files and their ancestor directories are retained.
+5. The comparison view reads parent-grouped result chunks and virtualizes visible rows for large directories.
+6. Search, sorting, navigation, changes-only CSV export, and column resizing happen locally.
 
 No application server is involved, and the source reports are not uploaded by this project.
 
@@ -118,7 +119,7 @@ npm run build
 ## Privacy and storage
 
 - Report processing is local to the browser.
-- IndexedDB stores imported nodes and comparisons for the page origin.
+- IndexedDB stores chunked snapshot data and changes-only comparisons for the page origin.
 - **Clear local data** removes stored snapshots and comparisons.
 - Browser quota and available disk space limit how much data can be indexed.
 - The XZ decoder is the only optional network-loaded component.
@@ -126,6 +127,7 @@ npm run build
 ## Limitations
 
 - GNU DU reports cannot provide GDU-only extension and qualified file metadata.
+- Unchanged files are intentionally omitted from the comparison browser, search results, and CSV export.
 - Browser storage quotas vary by browser and origin.
 - Very large reports still require enough local storage for their normalized index.
 - XZ input requires network access to load its decoder.
