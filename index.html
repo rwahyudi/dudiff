@@ -75,8 +75,12 @@
     .snapshot-heading h2 { margin-bottom:1px; font-size:13px; }
     .source-panel .import-card .fine-print { margin-bottom:0; font-size:10px; line-height:1.35; }
     .source-panel .dropzone { min-height:32px; margin-top:8px; border:1px solid #bfc5c1; border-radius:5px; padding:0 8px; display:flex; place-items:center; justify-content:flex-start; background:var(--surface); text-align:left; }
-    .source-panel .dropzone:hover, .source-panel .dropzone.dragover { background: var(--blue-bg); border-color: var(--blue); }
+    .source-panel .dropzone:hover,     .source-panel .dropzone.dragover { background: var(--blue-bg); border-color: var(--blue); }
     .source-panel .dropzone strong { display:inline; margin:0; font-size:11px; font-weight:650; }
+    .source-panel .sidebar-about { margin:12px 4px 2px; border-top:1px solid #d9dcda; padding-top:10px; }
+    .sidebar-repo { display:flex; align-items:center; gap:7px; color:var(--muted); font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace; text-decoration:none; }
+    .sidebar-repo:hover { color:var(--blue); }
+    .sidebar-repo .repo-icon { width:14px; height:14px; flex:0 0 auto; }
     .upload-button-content { display:flex !important; align-items:center; gap:7px; color:#34413a !important; }
     .source-panel .dropzone > span > span { display: none; }
     .source-panel .file-meta { min-height:28px; margin-top:6px; color:#5e615f; font-size:10px; line-height:1.35; white-space:pre-line; }
@@ -284,6 +288,7 @@
             <button class="button secondary" id="clear-button"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg><span>Clear local data</span></button>
           </div>
           <p class="fine-print">The page needs HTTPS or localhost for persistent local storage. A 16 GB archive is read in chunks; browser quota and available disk space still determine whether it can be indexed.</p>
+          <p class="sidebar-about"><a class="sidebar-repo" href="https://github.com/rwahyudi/dudiff" target="_blank" rel="noopener"><svg class="repo-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>View source on GitHub</a></p>
         </div>
       </aside>
 
